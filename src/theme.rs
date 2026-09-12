@@ -142,13 +142,11 @@ fn make_font(fam: *mut GpFontFamily, size: f32, bold: bool) -> *mut GpFont {
 
 impl Fonts {
     pub fn load(scale: f32) -> Self {
-        // Latin/digits: JetBrains Mono, which is monospaced so every digit and
-        // Latin glyph advances identically — that is what makes the metric
-        // columns line up.
+        // Latin/digits: monospaced so columns stay aligned.
         let latin_family = pick(&["JetBrains Mono", "Cascadia Code", "Consolas"])
             .pipe_fallback(|| pick(&["Microsoft YaHei UI", "Segoe UI"]));
-        // Chinese: HYYouYuan, whose family GDI+ resolves under the styled name.
-        let cjk_family = pick(&["HYYouYuan 55W", "汉仪有圆 55W"])
+        // CJK: HYJB, falling back to HYYouYuan then system fonts.
+        let cjk_family = pick(&["HYJB", "HYYouYuan 55W", "汉仪有圆 55W"])
             .pipe_fallback(|| pick(&["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"]));
 
         let s = |v: f32| v * scale;

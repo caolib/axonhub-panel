@@ -246,13 +246,20 @@ impl Row {
         matches!(self.cache_hit_rate(), Some(r) if r < 80.0 && self.prompt_tokens >= 40_000)
     }
 
-    /// Output throughput: total tokens per second of wall-clock latency.
+    /// Output throughput: output tokens per second of generation time.
+    /// Excludes prompt processing (TTFT) so the number reflects the model's
+    /// actual decoding speed, not the prompt length.
     pub fn tps(&self) -> Option<f64> {
         let ms = self.latency_ms?;
-        if ms <= 0 || self.total_tokens <= 0 {
+        if ms <= 0 {
             return None;
         }
-        Some(self.total_tokens as f64 / (ms as f64 / 1000.0))
+        let output = (self.total_tokens - self.prompt_tokens).max(0);
+        if output <= 0 {
+            return None;
+        }
+        let gen_ms = (ms - self.first_token_ms.unwrap_or(0)).max(1);
+        Some(output as f64 / (gen_ms as f64 / 1000.0))
     }
 
     /// The model that actually served the request. When AxonHub routed to a
