@@ -9,51 +9,17 @@
 use windows::Win32::Graphics::GdiPlus::RectF;
 
 use crate::format as fmt;
-use crate::model::{Row, Status};
+use crate::model::Row;
 use crate::theme::{self, Painter};
 use crate::ui::layout::{Metrics, Rect};
 
 /// Authored at 96 DPI; multiplied by `Metrics::scale` at draw time.
-const INNER_PAD: f32 = 11.0;
-const LINE1_H: f32 = 18.0;
-const LINE2_H: f32 = 17.0;
-const LINE3_H: f32 = 15.0;
-const CARD_RADIUS: f32 = 7.0;
+const INNER_PAD: f32 = 7.0;
+const LINE1_H: f32 = 17.0;
+const LINE2_H: f32 = 14.0;
+const CARD_RADIUS: f32 = 5.0;
 const ACCENT_W: f32 = 4.0;
-const ACCENT_INSET: f32 = 7.0;
-
-/// Column x-offsets for the metric row, measured from the card's inner edge.
-///
-/// Fixed offsets rather than "advance past the previous cell": with variable
-/// width neighbours (a long channel name, a card with no cache figure), packing
-/// text end-to-end makes every column start at a different x on every card.
-/// Reserving a slot per column keeps them aligned down the list.
-#[derive(Clone, Copy)]
-struct Columns {
-    channel: f32,
-    cache: f32,
-    tokens: f32,
-}
-
-impl Columns {
-    /// Slot boundaries in characters, converted to pixels using the measured
-    /// advance width of the row's font. Since every family used here is
-    /// monospaced, a character grid is the natural unit: it makes the slots
-    /// exact and keeps the gaps even regardless of DPI.
-    fn new(p: &Painter, font: &theme::DualFont) -> Self {
-        // Advance width of one character, measured from the actual Latin face
-        // rather than assumed, so the grid matches the rendered font exactly.
-        let advance = p.dual_measure(font, "0000") / 4.0;
-        let tab = |chars: f32| chars * advance;
-        Columns {
-            // Channel takes 17 characters (enough for `ag-caolib-cc`), then a
-            // two-character gap before the cache slot.
-            channel: 0.0,
-            cache: tab(18.0),
-            tokens: tab(28.0),
-        }
-    }
-}
+const ACCENT_INSET: f32 = 5.0;
 
 /// The card's internal measurements for one draw, already scaled to the monitor.
 #[derive(Clone, Copy)]
@@ -61,13 +27,12 @@ struct CardMetrics {
     inner_pad: f32,
     line1: f32,
     line2: f32,
-    line3: f32,
     radius: f32,
     accent_w: f32,
     accent_inset: f32,
     /// Heights of small pill-shaped chips (reasoning effort).
     chip_h: f32,
-    /// The status accent bar's vertical inset.
+    /// The gap between the two text lines.
     gap: f32,
 }
 
@@ -78,12 +43,11 @@ impl CardMetrics {
             inner_pad: INNER_PAD * s,
             line1: LINE1_H * s,
             line2: LINE2_H * s,
-            line3: LINE3_H * s,
             radius: CARD_RADIUS * s,
             accent_w: ACCENT_W * s,
             accent_inset: ACCENT_INSET * s,
-            chip_h: 14.0 * s,
-            gap: 2.0 * s,
+            chip_h: 13.0 * s,
+            gap: 3.0 * s,
         }
     }
 }
@@ -151,19 +115,9 @@ fn draw_edge(p: &Painter, m: Metrics) {
 
 fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     let s = m.scale;
-    let title_y = 8.0 * s;
-    p.dual_text(
-        &fonts.bold,
-        "AxonHub",
-        m.pad() + 2.0,
-        title_y,
-        150.0 * s,
-        22.0 * s,
-        theme::TEXT,
-        theme::ALIGN_NEAR,
-    );
+    let y = 6.0 * s;
 
-    // Right side answers "what is happening right now".
+    // Right side: active count and total.
     let active = v.rows.iter().filter(|r| r.status.is_active()).count();
     let right = m.width - m.pad() - 2.0;
 
@@ -171,43 +125,48 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     p.dual_text(
         &fonts.small,
         &total_text,
-        right - 90.0 * s,
-        title_y + 3.0 * s,
-        90.0 * s,
+        right - 56.0 * s,
+        y,
+        56.0 * s,
         18.0 * s,
         theme::TEXT_DIM,
         theme::ALIGN_FAR,
     );
 
     if active > 0 {
-        let dot_x = right - 158.0 * s;
-        round_dot(p, dot_x, title_y + 9.0 * s, 6.0 * s, theme::BLUE);
+        let dot_x = right - 118.0 * s;
+        round_dot(p, dot_x, y + 6.5 * s, 5.0 * s, theme::BLUE);
         p.dual_text(
             &fonts.small,
             &format!("{active} 进行中"),
-            dot_x + 11.0 * s,
-            title_y + 1.0 * s,
-            76.0 * s,
+            dot_x + 9.0 * s,
+            y,
+            52.0 * s,
             18.0 * s,
             theme::BLUE,
             theme::ALIGN_NEAR,
         );
     }
 
-    // Second line: identity and freshness.
+    // Left side: identity and freshness.
+    let sub_x = m.pad() + 2.0;
+    let sub_right = if active > 0 {
+        right - 128.0 * s
+    } else {
+        right - 62.0 * s
+    };
+    let sub_w = (sub_right - sub_x).max(0.0);
+
     let mut parts: Vec<String> = Vec::new();
     if let Some(user) = v.user {
         parts.push(user.to_string());
-    }
-    if let Some(t) = v.last_refresh {
-        parts.push(format!("更新于 {t}"));
     }
     if v.paused {
         parts.push("已暂停".into());
     }
     parts.push(format!("显示前 {} 条", v.rows.len()));
-    // Without a footer, the status line shares the subtitle row. A failure takes
-    // the row over entirely, since it matters more than the usual detail.
+    // Without a footer, the status line shares the subtitle. A failure takes
+    // the line over entirely, since it matters more than the usual detail.
     let (text, color) = match &v.status_text {
         Some((message, true)) => (message.clone(), theme::RED),
         Some((message, false)) => (format!("{}  ·  {}", parts.join("  ·  "), message), theme::GREEN),
@@ -216,10 +175,10 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     p.dual_text(
         &fonts.small,
         &text,
-        m.pad() + 2.0,
-        30.0 * m.scale,
-        m.width - (m.pad() + 2.0) * 2.0,
-        18.0 * m.scale,
+        sub_x,
+        y,
+        sub_w,
+        18.0 * s,
         color,
         theme::ALIGN_NEAR,
     );
@@ -292,77 +251,192 @@ fn draw_card(
     );
 
     let text_x = rect.x + c.inner_pad;
-    let text_w = rect.w - c.inner_pad * 2.0;
     let mut y = rect.y + c.accent_inset;
 
-    // --- line 1: request number, mark, time, cost ---
-    // Every cell on this line uses one font and the same rectangle, so their
-    // baselines agree; per-cell fonts and offsets made them sit at heights that
-    // differed by a pixel or two.
+    // --- Line 1: number, stream mark, badges, time(right) ---
     let line1_y = y;
+    let line1_gap = 6.0 * m.scale;
+    let mut x = text_x;
+
     let number_text = format!("#{}", row.number);
-    // Fixed slot: the clock must not shift with the width of the id.
-    let number_slot = 74.0 * m.scale;
+    let number_w = p.dual_measure(&fonts.body, &number_text);
     p.dual_text(
         &fonts.body,
         &number_text,
-        text_x,
+        x,
         line1_y,
-        number_slot,
+        number_w,
         c.line1,
         theme::TEXT_FAINT,
         theme::ALIGN_NEAR,
     );
+    x += number_w + line1_gap;
 
-    // `流式` is a status marker, not a metric, so it keeps the id's baseline.
     if row.stream {
+        let w = p.dual_measure(&fonts.body, "流");
         p.dual_text(
             &fonts.body,
-            "流式",
-            text_x + number_slot,
+            "流",
+            x,
             line1_y,
-            34.0 * m.scale,
+            w,
             c.line1,
             theme::BROWN,
             theme::ALIGN_NEAR,
         );
+        x += w + line1_gap;
     }
 
+    // Time: right-aligned on line 1.
+    let time_text = fmt::relative_time(row.created_at.as_deref(), v.now);
+    let time_w = p.dual_measure(&fonts.body, &time_text) + 4.0;
     p.dual_text(
         &fonts.body,
-        &fmt::relative_time(row.created_at.as_deref(), v.now),
-        text_x + number_slot + 34.0 * m.scale,
+        &time_text,
+        rect.x + rect.w - c.inner_pad - time_w,
         line1_y,
-        92.0 * m.scale,
+        time_w,
         c.line1,
         theme::TEXT_FAINT,
-        theme::ALIGN_NEAR,
+        theme::ALIGN_FAR,
     );
 
-    if let Some(cost) = row.cost {
-        let cost_text = fmt::cost(Some(cost));
-        let w = p.dual_measure(&fonts.body, &cost_text) + 4.0;
-        p.dual_text(
-            &fonts.body,
-            &cost_text,
-            rect.x + rect.w - c.inner_pad - w,
-            y,
+    // Badges between the stream marker and the time.
+    let badge_limit = rect.x + rect.w - c.inner_pad - time_w - 4.0 * m.scale;
+
+    // Reasoning effort chip.
+    if let Some(effort) = &row.reasoning_effort {
+        let w = p.dual_measure(&fonts.small, effort) + 12.0 * m.scale;
+        if x + w < badge_limit {
+            p.round_rect(x, line1_y + 2.0 * m.scale, w, c.chip_h, c.chip_h / 2.0, 0xFF1D2635, true);
+            p.dual_text(
+                &fonts.small,
+                effort,
+                x,
+                line1_y + 2.0 * m.scale,
+                w,
+                c.chip_h,
+                0xFF7FB2FF,
+                theme::ALIGN_CENTER,
+            );
+            x += w + 5.0 * m.scale;
+        }
+    }
+
+    // Protocol cell. Amber marks an in-flight conversion.
+    let protocol = row.protocol();
+    if let Some(label) = protocol.label() {
+        let w = p.dual_measure(&fonts.small, &label);
+        if x + w < badge_limit {
+            p.dual_text(
+                &fonts.small,
+                &label,
+                x,
+                line1_y,
+                w + 2.0 * m.scale,
+                c.line1,
+                if protocol.is_converted() {
+                    theme::GOLD
+                } else {
+                    theme::TEXT_FAINT
+                },
+                theme::ALIGN_NEAR,
+            );
+            x += w + 5.0 * m.scale;
+        }
+    }
+
+    // Pass-through badge: only drawn when it is on.
+    if row.pass_through && x + 42.0 * m.scale < badge_limit {
+        let label = "透传";
+        let w = p.dual_measure(&fonts.small, label) + 12.0 * m.scale;
+        p.round_rect(
+            x,
+            line1_y + 2.0 * m.scale,
             w,
-            c.line1,
-            if cost >= 0.1 { theme::YELLOW } else { theme::TEXT_DIM },
-            theme::ALIGN_FAR,
+            c.chip_h,
+            c.chip_h / 2.0,
+            0xFF2C2418,
+            true,
+        );
+        p.dual_text(
+            &fonts.small,
+            label,
+            x,
+            line1_y + 2.0 * m.scale,
+            w,
+            c.chip_h,
+            theme::GOLD,
+            theme::ALIGN_CENTER,
         );
     }
+
     y += c.line1 + c.gap;
 
-    // --- line 2: model, reasoning effort, protocol ---
+    // --- Line 2: model, channel, cache, tokens, TPS, retry, caller ---
+    // Right-aligned items are placed first so the left cluster can be clipped
+    // to whatever space remains.
+    let mut right_edge = rect.x + rect.w - c.inner_pad;
+
+    // Caller (far right).
+    if let Some(caller) = &row.caller {
+        let w = p.dual_measure(&fonts.small, caller).min(130.0 * m.scale);
+        p.dual_text(
+            &fonts.small,
+            caller,
+            right_edge - w,
+            y,
+            w + 2.0 * m.scale,
+            c.line2,
+            theme::TEXT_FAINT,
+            theme::ALIGN_FAR,
+        );
+        right_edge -= w + 10.0 * m.scale;
+    }
+
+    // TPS (tokens per second).
+    if let Some(tps) = row.tps() {
+        let label = format!("{tps:.0} tok/s");
+        let w = p.dual_measure(&fonts.small, &label);
+        p.dual_text(
+            &fonts.small,
+            &label,
+            right_edge - w - 2.0 * m.scale,
+            y,
+            w + 4.0 * m.scale,
+            c.line2,
+            theme::TEXT_DIM,
+            theme::ALIGN_FAR,
+        );
+        right_edge -= w + 10.0 * m.scale;
+    }
+
+    // Retry badge.
+    if row.attempt_count > 1 {
+        let label = format!("{} 次重试", row.attempt_count - 1);
+        let w = p.dual_measure(&fonts.small, &label) + 6.0;
+        p.dual_text(
+            &fonts.small,
+            &label,
+            right_edge - w,
+            y,
+            w,
+            c.line2,
+            theme::RED,
+            theme::ALIGN_FAR,
+        );
+        right_edge -= w + 10.0 * m.scale;
+    }
+
+    // Left-aligned items: model first, then metrics advancing past each cell.
+    let line2_gap = 6.0 * m.scale;
     let mut x = text_x;
-    // Show only the model that served the request; gold marks the case where
-    // that differs from what was asked for.
+
+    // Model name.
     let model_label = row.served_model();
-    let model_w = p.dual_measure(&fonts.body, model_label).min(text_w * 0.62);
+    let model_w = p.dual_measure(&fonts.small, model_label).min((right_edge - x).max(0.0));
     p.dual_text(
-        &fonts.body,
+        &fonts.small,
         model_label,
         x,
         y,
@@ -375,186 +449,65 @@ fn draw_card(
         },
         theme::ALIGN_NEAR,
     );
-    x += model_w + 7.0 * m.scale;
+    x += model_w + line2_gap;
 
-    if let Some(effort) = &row.reasoning_effort {
-        let w = p.dual_measure(&fonts.small, effort) + 14.0 * m.scale;
-        if x + w < rect.x + rect.w - c.inner_pad {
-            p.round_rect(x, y + 1.5 * m.scale, w, c.chip_h, c.chip_h / 2.0, 0xFF1D2635, true);
+    // Channel.
+    if let Some(channel) = &row.channel {
+        let w = p.dual_measure(&fonts.small, channel);
+        if x + w < right_edge {
             p.dual_text(
                 &fonts.small,
-                effort,
+                channel,
                 x,
-                y + 1.5 * m.scale,
+                y,
                 w,
-                c.chip_h,
-                0xFF7FB2FF,
-                theme::ALIGN_CENTER,
+                c.line2,
+                theme::TEXT_DIM,
+                theme::ALIGN_NEAR,
             );
-            x += w + 7.0 * m.scale;
+            x += w + line2_gap;
         }
     }
 
-    // Protocol cell. Amber marks an in-flight conversion, the only case worth
-    // drawing attention to; a match stays muted.
-    let protocol = row.protocol();
-    if let Some(label) = protocol.label() {
+    // Cache hit rate.
+    if let Some(rate) = row.cache_hit_rate() {
+        let label = format!("缓 {rate:.2}%");
         let w = p.dual_measure(&fonts.small, &label);
-        if x + w < rect.x + rect.w - c.inner_pad {
+        if x + w < right_edge {
             p.dual_text(
                 &fonts.small,
                 &label,
                 x,
-                y + 1.0,
-                w + 2.0 * m.scale,
+                y,
+                w,
                 c.line2,
-                if protocol.is_converted() {
-                    theme::GOLD
+                if row.cache_hit_is_low() {
+                    theme::RED
                 } else {
-                    theme::TEXT_FAINT
+                    theme::GREEN
                 },
                 theme::ALIGN_NEAR,
             );
-            x += w + 7.0 * m.scale;
+            x += w + line2_gap;
         }
     }
 
-    // Pass-through badge: only drawn when it is on, since "not applied" is the
-    // normal case and a marker for it would be noise.
-    if row.pass_through && x + 42.0 * m.scale < rect.x + rect.w - c.inner_pad {
-        let label = "透传";
-        let w = p.dual_measure(&fonts.small, label) + 12.0 * m.scale;
-        p.round_rect(
-            x,
-            y + 1.5 * m.scale,
-            w,
-            c.chip_h,
-            c.chip_h / 2.0,
-            0xFF2C2418,
-            true,
-        );
-        p.dual_text(
-            &fonts.small,
-            label,
-            x,
-            y + 1.5 * m.scale,
-            w,
-            c.chip_h,
-            theme::GOLD,
-            theme::ALIGN_CENTER,
-        );
-    }
-
-    // Retry badge right-aligned when AxonHub retried upstream.
-    if row.attempt_count > 1 {
-        let label = format!("{} 次重试", row.attempt_count - 1);
-        let w = p.dual_measure(&fonts.small, &label) + 6.0;
-        p.dual_text(
-            &fonts.small,
-            &label,
-            rect.x + rect.w - c.inner_pad - w,
-            y + 1.0,
-            w,
-            c.line2,
-            theme::RED,
-            theme::ALIGN_FAR,
-        );
-    }
-    y += c.line2;
-
-    // --- line 3: channel, cache, tokens, latency, caller ---
-    // Right-aligned items are placed first so the left cluster can be clipped
-    // to whatever space remains. Every left-hand cell starts at a fixed column
-    // so the row reads as a table rather than as drifting text.
-    let mut right_edge = rect.x + rect.w - c.inner_pad;
-
-    // Caller sits at the far right: it identifies the source rather than
-    // measuring the request, so it is kept out of the metrics cluster.
-    if let Some(caller) = &row.caller {
-        let w = p.dual_measure(&fonts.small, caller).min(140.0 * m.scale);
-        p.dual_text(
-            &fonts.small,
-            caller,
-            right_edge - w,
-            y,
-            w + 2.0 * m.scale,
-            c.line3,
-            theme::TEXT_FAINT,
-            theme::ALIGN_FAR,
-        );
-        right_edge -= w + 10.0 * m.scale;
-    }
-    if row.status == Status::Completed && row.latency_ms.is_some() {
-        let latency = format!(
-            "{} / {}",
-            fmt::duration(row.latency_ms),
-            fmt::duration(row.first_token_ms)
-        );
-        let w = p.dual_measure(&fonts.small, &latency);
-        p.dual_text(
-            &fonts.small,
-            &latency,
-            right_edge - w - 2.0 * m.scale,
-            y,
-            w + 4.0 * m.scale,
-            c.line3,
-            theme::TEXT_DIM,
-            theme::ALIGN_FAR,
-        );
-        right_edge -= w + 12.0 * m.scale;
-    }
-
-    let cols = Columns::new(p, &fonts.small);
-    let slot = |offset: f32| text_x + offset;
-    // One character of slack between slots, so neighbouring cells never touch.
-    let gap = p.dual_measure(&fonts.small, "0");
-
-    // Channel: a fixed slot, truncated rather than allowed to push its
-    // neighbours along.
-    if let Some(channel) = &row.channel {
-        p.dual_text(
-            &fonts.small,
-            channel,
-            slot(cols.channel),
-            y,
-            (cols.cache - cols.channel) - gap,
-            c.line3,
-            theme::TEXT_DIM,
-            theme::ALIGN_NEAR,
-        );
-    }
-
-    // Cache hit rate is only meaningful, and only shown, when caching occurred.
-    if let Some(rate) = row.cache_hit_rate() {
-        let label = format!("缓存 {rate:.2}%");
-        p.dual_text(
-            &fonts.small,
-            &label,
-            slot(cols.cache),
-            y,
-            (cols.tokens - cols.cache) - gap,
-            c.line3,
-            if row.cache_hit_is_low() {
-                theme::RED
-            } else {
-                theme::GREEN
-            },
-            theme::ALIGN_NEAR,
-        );
-    }
-
+    // Tokens.
     if row.total_tokens > 0 {
         let tokens = fmt::tokens_compact(row.total_tokens);
-        p.dual_text(
-            &fonts.small,
-            &tokens,
-            slot(cols.tokens),
-            y,
-            (right_edge - slot(cols.tokens)).max(0.0),
-            c.line3,
-            theme::TEXT_DIM,
-            theme::ALIGN_NEAR,
-        );
+        let w = p.dual_measure(&fonts.small, &tokens);
+        if x + w < right_edge {
+            p.dual_text(
+                &fonts.small,
+                &tokens,
+                x,
+                y,
+                w,
+                c.line2,
+                theme::TEXT_DIM,
+                theme::ALIGN_NEAR,
+            );
+        }
     }
 }
 

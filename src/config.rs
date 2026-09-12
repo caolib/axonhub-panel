@@ -67,7 +67,7 @@ pub struct WindowState {
     pub height: i32,
 }
 
-/// Rows the panel shows by default. Twelve cards plus chrome is about 916px,
+/// Rows the panel shows by default. Twelve cards plus chrome is about 567px,
 /// which fits a 1080p work area with room to spare.
 pub const DEFAULT_ROWS: usize = 12;
 

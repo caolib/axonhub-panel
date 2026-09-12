@@ -7,10 +7,10 @@
 //! monitor scale when a `Metrics` is built. Fonts are scaled the same way, so
 //! text and the boxes holding it stay in proportion on a scaled monitor.
 
-pub const PAD: f32 = 12.0;
-pub const CARD_H: f32 = 64.0;
-pub const CARD_GAP: f32 = 6.0;
-pub const HEADER_H: f32 = 56.0;
+pub const PAD: f32 = 8.0;
+pub const CARD_H: f32 = 44.0;
+pub const CARD_GAP: f32 = 4.0;
+pub const HEADER_H: f32 = 30.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Rect {
@@ -150,7 +150,7 @@ pub fn rows_in_height(height: f32, scale: f32) -> usize {
 pub fn height_for_rows(rows: usize, scale: f32) -> i32 {
     let m = Metrics::new(0.0, 0.0, scale);
     let rows = rows.max(1);
-    (m.header_h + rows as f32 * m.pitch() - m.card_gap).round() as i32
+    (m.header_h + rows as f32 * m.pitch() - m.card_gap).ceil() as i32
 }
 
 #[cfg(test)]
@@ -161,10 +161,10 @@ mod tests {
     fn layout_scales_with_the_monitor() {
         let at_100 = Metrics::new(400.0, 800.0, 1.0);
         let at_150 = Metrics::new(600.0, 1200.0, 1.5);
-        assert_eq!(at_100.card_h, 64.0);
-        assert_eq!(at_150.card_h, 96.0);
-        assert_eq!(at_150.pitch(), 105.0);
-        assert_eq!(at_150.pad(), 18.0);
+        assert_eq!(at_100.card_h, 44.0);
+        assert_eq!(at_150.card_h, 66.0);
+        assert_eq!(at_150.pitch(), 72.0);
+        assert_eq!(at_150.pad(), 12.0);
     }
 
     #[test]

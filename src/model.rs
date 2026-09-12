@@ -246,6 +246,15 @@ impl Row {
         matches!(self.cache_hit_rate(), Some(r) if r < 80.0 && self.prompt_tokens >= 40_000)
     }
 
+    /// Output throughput: total tokens per second of wall-clock latency.
+    pub fn tps(&self) -> Option<f64> {
+        let ms = self.latency_ms?;
+        if ms <= 0 || self.total_tokens <= 0 {
+            return None;
+        }
+        Some(self.total_tokens as f64 / (ms as f64 / 1000.0))
+    }
+
     /// The model that actually served the request. When AxonHub routed to a
     /// different model than the client asked for, the served one is what the
     /// card shows; the caller marks it with `is_routed()`.
