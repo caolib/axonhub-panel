@@ -52,7 +52,7 @@ const SMOOTH_ANTIALIAS: SmoothingMode = SmoothingMode(4);
 const TEXT_CLEARTYPE: TextRenderingHint = TextRenderingHint(5);
 const OFFSET_HALF: PixelOffsetMode = PixelOffsetMode(4);
 const TRIM_ELLIPSIS: StringTrimming = StringTrimming(3);
-const LINE_CENTER: StringAlignment = StringAlignment(1);
+const LINE_ALIGN_TOP: StringAlignment = StringAlignment(0);
 const NO_WRAP: i32 = 0x1000;
 
 pub const ALIGN_NEAR: u32 = 0;
@@ -142,12 +142,11 @@ fn make_font(fam: *mut GpFontFamily, size: f32, bold: bool) -> *mut GpFont {
 
 impl Fonts {
     pub fn load(scale: f32) -> Self {
-        // Latin/digits: monospaced so columns stay aligned.
-        let latin_family = pick(&["JetBrains Mono", "Cascadia Code", "Consolas"])
-            .pipe_fallback(|| pick(&["Microsoft YaHei UI", "Segoe UI"]));
-        // CJK: HYJB, falling back to HYYouYuan then system fonts.
-        let cjk_family = pick(&["HYJB", "HYYouYuan 55W", "汉仪有圆 55W"])
-            .pipe_fallback(|| pick(&["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"]));
+        // Single font family for both Latin and CJK — Maple Mono NF CN
+        // supports both, so run splitting uses the same metrics everywhere.
+        let family = pick(&["Maple Mono NF CN", "Microsoft YaHei UI", "Segoe UI"]);
+        let latin_family = family;
+        let cjk_family = family;
 
         let s = |v: f32| v * scale;
         let dual = |size: f32, bold: bool| DualFont {
@@ -348,7 +347,7 @@ impl Painter {
             let mut fmt: *mut GpStringFormat = std::ptr::null_mut();
             GdipCreateStringFormat(0, 0, &mut fmt);
             GdipSetStringFormatAlign(fmt, StringAlignment(align as i32));
-            GdipSetStringFormatLineAlign(fmt, LINE_CENTER);
+            GdipSetStringFormatLineAlign(fmt, LINE_ALIGN_TOP);
             GdipSetStringFormatTrimming(fmt, TRIM_ELLIPSIS);
             GdipSetStringFormatFlags(fmt, NO_WRAP);
 

@@ -55,6 +55,7 @@ pub struct Config {
     /// Empty disables it. Lets the token stay out of the config file entirely.
     pub token_env_var: String,
     pub always_on_top: bool,
+    pub pin_position: bool,
     pub window: WindowState,
 }
 
@@ -95,6 +96,7 @@ impl Default for Config {
             credential_mode: CredentialMode::Token,
             token_env_var: "AXONHUB_ACCESS_TOKEN".into(),
             always_on_top: true,
+            pin_position: false,
             window: WindowState::default(),
         }
     }

@@ -44,11 +44,10 @@ pub fn cost(v: Option<f64>) -> String {
 
 pub const DASH: &str = "—";
 
-/// Relative age such as `刚刚` / `3 分钟前` / `2 小时前` / `昨天 11:20` / `3 天前`.
+/// Relative age such as `just now` / `30s ago` / `2 min ago` / `1 hr ago`.
 ///
 /// Recent requests are what the panel is for, so the first minutes are shown in
-/// seconds and anything older than a week falls back to an absolute date, where
-/// "12 天前" stops being easier to read than the date itself.
+/// seconds and anything older than a week falls back to an absolute date.
 pub fn relative_time(iso: Option<&str>, now: i64) -> String {
     let Some(then) = iso.and_then(crate::time::parse_unix) else {
         return DASH.into();
@@ -61,12 +60,12 @@ pub fn relative_time(iso: Option<&str>, now: i64) -> String {
     }
     let clock = local_clock(iso);
     match delta {
-        0..=4 => "刚刚".into(),
-        5..=59 => format!("{delta} 秒前"),
-        60..=3599 => format!("{} 分钟前", delta / 60),
-        3600..=86_399 => format!("{} 小时前", delta / 3600),
-        86_400..=172_799 => format!("昨天 {clock}"),
-        _ if delta < 7 * 86_400 => format!("{} 天前", delta / 86_400),
+        0..=4 => "just now".into(),
+        5..=59 => format!("{delta}s"),
+        60..=3599 => format!("{} min", delta / 60),
+        3600..=86_399 => format!("{} hr", delta / 3600),
+        86_400..=172_799 => format!("yesterday {clock}"),
+        _ if delta < 7 * 86_400 => format!("{} days", delta / 86_400),
         _ => clock,
     }
 }
@@ -124,21 +123,21 @@ mod tests {
 
     #[test]
     fn buckets_recent_ages() {
-        assert_eq!(at(0), "刚刚");
-        assert_eq!(at(4), "刚刚");
-        assert_eq!(at(5), "5 秒前");
-        assert_eq!(at(59), "59 秒前");
-        assert_eq!(at(60), "1 分钟前");
-        assert_eq!(at(3599), "59 分钟前");
-        assert_eq!(at(3600), "1 小时前");
-        assert_eq!(at(86_399), "23 小时前");
+        assert_eq!(at(0), "just now");
+        assert_eq!(at(4), "just now");
+        assert_eq!(at(5), "5s");
+        assert_eq!(at(59), "59s");
+        assert_eq!(at(60), "1 min");
+        assert_eq!(at(3599), "59 min");
+        assert_eq!(at(3600), "1 hr");
+        assert_eq!(at(86_399), "23 hr");
     }
 
     #[test]
     fn switches_to_a_date_beyond_a_week() {
-        // A week out, an absolute clock reading is easier to read than "7 天前".
+        // A week out, an absolute clock reading is easier to read than "7 days".
         assert_eq!(at(7 * 86_400), local_clock(Some("2026-09-12T02:20:57Z")));
-        assert!(at(6 * 86_400).ends_with("天前"));
+        assert!(at(6 * 86_400).ends_with("days"));
     }
 
     #[test]

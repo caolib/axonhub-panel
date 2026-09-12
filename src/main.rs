@@ -28,6 +28,7 @@ use windows::Win32::Graphics::GdiPlus::{
 };
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow};
 use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_BACK, VK_ESCAPE, VK_RETURN, VK_TAB,
 };
@@ -150,6 +151,11 @@ const MENU_SIGNIN: usize = 1100;
 const MENU_OPEN: usize = 1101;
 const MENU_TOPMOST: usize = 1200;
 const MENU_CLEAR_CREDS: usize = 1201;
+const MENU_PIN_POSITION: usize = 1202;
+const MENU_ROWS_5: usize = 1400;
+const MENU_ROWS_10: usize = 1401;
+const MENU_ROWS_15: usize = 1402;
+const MENU_ROWS_20: usize = 1403;
 const MENU_QUIT: usize = 1300;
 
 thread_local! {
@@ -241,10 +247,13 @@ fn edge_at(m: Metrics, x: f32, y: f32) -> Option<Edge> {
 /// * window margins  -> a resize edge
 /// * anything clickable (cards on the list, controls on the sign-in form)
 ///   -> `HTCLIENT`, otherwise the press would be eaten as a window drag
-/// * everything else -> `HTCAPTION`, so the panel can still be moved
 fn hit_test(m: Metrics, x: f32, y: f32) -> isize {
-    if let Some(edge) = edge_at(m, x, y) {
-        return edge.hit_test() as isize;
+    let pinned = State::with(|s| s.app.config.pin_position).unwrap_or(false);
+
+    if !pinned {
+        if let Some(edge) = edge_at(m, x, y) {
+            return edge.hit_test() as isize;
+        }
     }
 
     let clickable = State::with(|s| {
@@ -254,12 +263,15 @@ fn hit_test(m: Metrics, x: f32, y: f32) -> isize {
                 .as_ref()
                 .is_some_and(|form| login::hit(form, m, x, y).is_some())
         } else {
-            panel::hit_row(m, &list_view(s), x, y).is_some()
+            // Cards are not clickable: the whole surface is a drag handle so
+            // a stray click can never open a browser. The request detail page
+            // is reachable from the right-click menu instead.
+            false
         }
     })
     .unwrap_or(false);
 
-    if clickable {
+    if clickable || pinned {
         HTCLIENT as isize
     } else {
         HTCAPTION as isize
@@ -288,6 +300,14 @@ fn dpi_scale(hwnd: HWND) -> f32 {
 fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // Dark Win32 menus: load SetPreferredAppMode from uxtheme.dll.
+        let uxtheme: Vec<u16> = "uxtheme.dll".encode_utf16().chain(std::iter::once(0)).collect();
+        if let Ok(h) = GetModuleHandleW(PCWSTR(uxtheme.as_ptr())) {
+            if let Some(proc) = GetProcAddress(h, windows::core::PCSTR(b"SetPreferredAppMode\0".as_ptr())) {
+                let func: unsafe extern "system" fn(u32) -> i32 = std::mem::transmute(proc);
+                func(3); // AllowDark
+            }
+        }
 
         let mut token = 0usize;
         let input = GdiplusStartupInput {
@@ -619,7 +639,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_LBUTTONDOWN => on_left_down(hwnd, lp, &mut actions),
         WM_LBUTTONUP => on_left_up(hwnd, lp),
-        WM_RBUTTONUP | WM_CONTEXTMENU => actions.push(Action::ShowMenu),
+        WM_RBUTTONUP | WM_CONTEXTMENU | WM_NCRBUTTONUP => actions.push(Action::ShowMenu),
         WM_MOUSEWHEEL => on_wheel(hwnd, wp, &mut actions),
         WM_KEYDOWN | WM_CHAR | WM_SYSKEYDOWN => on_key(hwnd, msg, wp, &mut actions),
         WM_DPICHANGED => {
@@ -702,6 +722,8 @@ enum Action {
     OpenLogin(Option<String>),
     /// The window was resized by hand; fetch this many rows.
     RefreshRowCount(usize),
+    /// Change the row count from the menu and resize the window to fit.
+    ResizeToRows(usize),
     /// Toggle `WS_EX_NOACTIVATE` so the window can (or cannot) take focus.
     SetActivatable(bool),
     ClearCredentials,
@@ -751,6 +773,32 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                         s.worker.send(Command::SetRowLimit(limit));
                     }
                 });
+            }
+            Action::ResizeToRows(rows) => {
+                let limit = rows.max(1) as i64;
+                State::with(|s| {
+                    s.app.config.row_limit = limit;
+                    s.app.scroll = 0.0;
+                    s.worker.send(Command::SetRowLimit(limit));
+                });
+                let scale = dpi_scale(hwnd);
+                let height = ui::layout::height_for_rows(rows, scale)
+                    .min(work_area().3 - work_area().1);
+                let mut rc = RECT::default();
+                unsafe { let _ = GetWindowRect(hwnd, &mut rc); }
+                let _ = unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        None,
+                        0,
+                        0,
+                        rc.right - rc.left,
+                        height,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                };
+                save_window_state(hwnd);
+                invalidate(hwnd);
             }
             Action::Paste => {
                 if let Some(text) = clipboard_text() {
@@ -864,6 +912,7 @@ fn paint(hwnd: HWND) {
                         user: s.app.user_name.as_deref(),
                         last_refresh: s.app.last_refresh.as_deref(),
                         paused: s.app.paused,
+                        pinned: s.app.config.pin_position,
                     };
                     panel::draw(&painter, &s.fonts, m, &view);
                 }
@@ -1087,6 +1136,7 @@ fn list_view(s: &State) -> ListView<'_> {
         user: None,
         last_refresh: None,
         paused: s.app.paused,
+        pinned: s.app.config.pin_position,
     }
 }
 
@@ -1264,6 +1314,9 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
             s.app.config.always_on_top = !s.app.config.always_on_top;
             actions.push(Action::SetTopmost(s.app.config.always_on_top));
         }
+        MENU_PIN_POSITION => {
+            s.app.config.pin_position = !s.app.config.pin_position;
+        }
         MENU_OPEN => {
             let url = format!(
                 "{}/project/requests",
@@ -1272,12 +1325,15 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
             actions.push(Action::OpenUrl(url));
         }
         MENU_SIGNIN => actions.push(Action::OpenLogin(None)),
-        MENU_CLEAR_CREDS => actions.push(Action::ClearCredentials),
         MENU_QUIT => actions.push(Action::Quit),
+        MENU_ROWS_5 => actions.push(Action::ResizeToRows(5)),
+        MENU_ROWS_10 => actions.push(Action::ResizeToRows(10)),
+        MENU_ROWS_15 => actions.push(Action::ResizeToRows(15)),
+        MENU_ROWS_20 => actions.push(Action::ResizeToRows(20)),
         _ => return,
     });
     // Settings changed by a menu command are persisted after the borrow ends.
-    if id == MENU_TOPMOST {
+    if id == MENU_TOPMOST || id == MENU_PIN_POSITION {
         actions.push(Action::Save);
     }
     actions.push(Action::Redraw);
@@ -1305,17 +1361,34 @@ fn show_menu(hwnd: HWND) {
             let _ = AppendMenuW(menu, flags, id, PCWSTR(wide.as_mut_ptr()));
         };
 
-        let (paused, topmost) =
-            State::with(|s| (s.app.paused, s.app.config.always_on_top)).unwrap_or((false, true));
-
+        let (paused, topmost, pinned) =
+            State::with(|s| (s.app.paused, s.app.config.always_on_top, s.app.config.pin_position)).unwrap_or((false, true, false));
+        // Row count submenu.
+        let current_rows = State::with(|s| s.app.config.row_limit as usize).unwrap_or(12);
+        if let Ok(rows_menu) = CreatePopupMenu() {
+            let items: &[(&str, usize, usize)] = &[
+                ("5 条", MENU_ROWS_5, 5),
+                ("10 条", MENU_ROWS_10, 10),
+                ("15 条", MENU_ROWS_15, 15),
+                ("20 条", MENU_ROWS_20, 20),
+            ];
+            for &(text, mid, count) in items {
+                let mut wide = text.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+                let mut flags = MF_STRING;
+                if current_rows == count {
+                    flags |= MF_CHECKED;
+                }
+                let _ = AppendMenuW(rows_menu, flags, mid, PCWSTR(wide.as_mut_ptr()));
+            }
+            let mut sub_label = "显示数量".encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+            let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, rows_menu.0 as usize, PCWSTR(sub_label.as_mut_ptr()));
+        }
         add("刷新", MENU_REFRESH, false, true);
-        add("暂停轮询", MENU_PAUSE, paused, true);
+        add("打开请求页", MENU_OPEN, false, true);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        add("在浏览器中打开请求页", MENU_OPEN, false, true);
-        add("重新登录…", MENU_SIGNIN, false, true);
         add("清除保存的凭据", MENU_CLEAR_CREDS, false, true);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        add("总在最前", MENU_TOPMOST, topmost, true);
+        add("固定窗口位置", MENU_PIN_POSITION, pinned, true);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add("退出", MENU_QUIT, false, true);
 

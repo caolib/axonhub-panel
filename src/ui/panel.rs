@@ -65,42 +65,14 @@ pub struct ListView<'a> {
     pub user: Option<&'a str>,
     pub last_refresh: Option<&'a str>,
     pub paused: bool,
+    pub pinned: bool,
 }
 
 pub fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     p.fill_rect(0.0, 0.0, m.width, m.height, theme::BG);
     draw_header(p, fonts, m, v);
     draw_rows(p, fonts, m, v);
-    draw_scrollbar(p, m, v);
     draw_edge(p, m);
-}
-
-/// Thin scroll indicator: the panel is taller than a screen can show whole, so
-/// the position within the full result set needs to be visible.
-fn draw_scrollbar(p: &Painter, m: Metrics, v: &ListView) {
-    let max = m.max_scroll(v.rows.len());
-    if max <= 0.0 {
-        return;
-    }
-    let s = m.scale;
-    let track_y = m.rows_top() + 2.0 * s;
-    let track_h = m.rows_viewport_h() - 4.0 * s;
-    if track_h <= 8.0 * s {
-        return;
-    }
-    let total = m.content_h(v.rows.len());
-    let thumb_h = (track_h * m.rows_viewport_h() / total).max(24.0 * s);
-    let progress = (v.scroll / max).clamp(0.0, 1.0);
-    let thumb_y = track_y + (track_h - thumb_h) * progress;
-    p.round_rect(
-        m.width - 5.0 * s,
-        thumb_y,
-        3.0 * s,
-        thumb_h,
-        1.5 * s,
-        theme::with_alpha(theme::TEXT_DIM, 0x9A),
-        true,
-    );
 }
 
 /// One-pixel outline so the panel separates from whatever is behind it.
@@ -148,8 +120,20 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         );
     }
 
-    // Left side: identity and freshness.
-    let sub_x = m.pad() + 2.0;
+    // Lock icon when window position is pinned.
+    let sub_x = if v.pinned {
+        let lx = m.pad() + 2.0;
+        let ly = y + 4.0 * s;
+        let c = theme::TEXT_DIM;
+        let bw = 7.0 * s;
+        // Shackle (outlined arc on top).
+        p.round_rect(lx + 1.5 * s, ly, 4.0 * s, 5.0 * s, 2.0 * s, c, false);
+        // Body (filled rounded rect).
+        p.round_rect(lx, ly + 3.0 * s, bw, 5.0 * s, 1.5 * s, c, true);
+        m.pad() + 2.0 + bw + 6.0 * s
+    } else {
+        m.pad() + 2.0
+    };
     let sub_right = if active > 0 {
         right - 128.0 * s
     } else {
@@ -253,26 +237,13 @@ fn draw_card(
     let text_x = rect.x + c.inner_pad;
     let mut y = rect.y + c.accent_inset;
 
-    // --- Line 1: number, stream mark, badges, time(right) ---
+    // --- Line 1: marks, caller, channel, time(right) ---
     let line1_y = y;
     let line1_gap = 6.0 * m.scale;
     let mut x = text_x;
+    let mark_gap = 2.0 * m.scale;
 
-    let number_text = format!("#{}", row.number);
-    let number_w = p.dual_measure(&fonts.body, &number_text);
-    p.dual_text(
-        &fonts.body,
-        &number_text,
-        x,
-        line1_y,
-        number_w,
-        c.line1,
-        theme::TEXT_FAINT,
-        theme::ALIGN_NEAR,
-    );
-    x += number_w + line1_gap;
-
-    if row.stream {
+    {
         let w = p.dual_measure(&fonts.body, "流");
         p.dual_text(
             &fonts.body,
@@ -281,7 +252,47 @@ fn draw_card(
             line1_y,
             w,
             c.line1,
-            theme::BROWN,
+            if row.stream { theme::GREEN } else { theme::TEXT_FAINT },
+            theme::ALIGN_NEAR,
+        );
+        x += w + mark_gap;
+    }
+
+    // Protocol conversion mark: 转 highlighted when converted.
+    {
+        let w = p.dual_measure(&fonts.body, "转");
+        p.dual_text(
+            &fonts.body,
+            "转",
+            x,
+            line1_y,
+            w,
+            c.line1,
+            if row.protocol().is_converted() {
+                theme::GREEN
+            } else {
+                theme::TEXT_FAINT
+            },
+            theme::ALIGN_NEAR,
+        );
+        x += w + mark_gap;
+    }
+
+    // Pass-through mark: 透 highlighted when applied.
+    {
+        let w = p.dual_measure(&fonts.body, "透");
+        p.dual_text(
+            &fonts.body,
+            "透",
+            x,
+            line1_y,
+            w,
+            c.line1,
+            if row.pass_through {
+                theme::GREEN
+            } else {
+                theme::TEXT_FAINT
+            },
             theme::ALIGN_NEAR,
         );
         x += w + line1_gap;
@@ -301,98 +312,52 @@ fn draw_card(
         theme::ALIGN_FAR,
     );
 
-    // Badges between the stream marker and the time.
+    // Remaining space between marks and time.
     let badge_limit = rect.x + rect.w - c.inner_pad - time_w - 4.0 * m.scale;
 
-    // Reasoning effort chip.
-    if let Some(effort) = &row.reasoning_effort {
-        let w = p.dual_measure(&fonts.small, effort) + 12.0 * m.scale;
-        if x + w < badge_limit {
-            p.round_rect(x, line1_y + 2.0 * m.scale, w, c.chip_h, c.chip_h / 2.0, 0xFF1D2635, true);
-            p.dual_text(
-                &fonts.small,
-                effort,
-                x,
-                line1_y + 2.0 * m.scale,
-                w,
-                c.chip_h,
-                0xFF7FB2FF,
-                theme::ALIGN_CENTER,
-            );
-            x += w + 5.0 * m.scale;
-        }
-    }
-
-    // Protocol cell. Amber marks an in-flight conversion.
-    let protocol = row.protocol();
-    if let Some(label) = protocol.label() {
-        let w = p.dual_measure(&fonts.small, &label);
+    // Caller (API key name).
+    if let Some(caller) = &row.caller {
+        let w = p.dual_measure(&fonts.small, caller);
         if x + w < badge_limit {
             p.dual_text(
                 &fonts.small,
-                &label,
+                caller,
                 x,
                 line1_y,
                 w + 2.0 * m.scale,
                 c.line1,
-                if protocol.is_converted() {
-                    theme::GOLD
-                } else {
-                    theme::TEXT_FAINT
-                },
+                theme::TEXT_FAINT,
                 theme::ALIGN_NEAR,
             );
             x += w + 5.0 * m.scale;
         }
     }
 
-    // Pass-through badge: only drawn when it is on.
-    if row.pass_through && x + 42.0 * m.scale < badge_limit {
-        let label = "透传";
-        let w = p.dual_measure(&fonts.small, label) + 12.0 * m.scale;
-        p.round_rect(
-            x,
-            line1_y + 2.0 * m.scale,
-            w,
-            c.chip_h,
-            c.chip_h / 2.0,
-            0xFF2C2418,
-            true,
-        );
-        p.dual_text(
-            &fonts.small,
-            label,
-            x,
-            line1_y + 2.0 * m.scale,
-            w,
-            c.chip_h,
-            theme::GOLD,
-            theme::ALIGN_CENTER,
-        );
+    // Channel.
+    if let Some(channel) = &row.channel {
+        let w = p.dual_measure(&fonts.small, channel);
+        if x + w < badge_limit {
+            p.dual_text(
+                &fonts.small,
+                channel,
+                x,
+                line1_y,
+                w + 2.0 * m.scale,
+                c.line1,
+                theme::TEXT_DIM,
+                theme::ALIGN_NEAR,
+            );
+            x += w + 5.0 * m.scale;
+        }
     }
 
     y += c.line1 + c.gap;
 
-    // --- Line 2: model, channel, cache, tokens, TPS, retry, caller ---
+    // --- Line 2: model, cache, tokens, TPS, retry ---
     // Right-aligned items are placed first so the left cluster can be clipped
     // to whatever space remains.
     let mut right_edge = rect.x + rect.w - c.inner_pad;
 
-    // Caller (far right).
-    if let Some(caller) = &row.caller {
-        let w = p.dual_measure(&fonts.small, caller).min(130.0 * m.scale);
-        p.dual_text(
-            &fonts.small,
-            caller,
-            right_edge - w,
-            y,
-            w + 2.0 * m.scale,
-            c.line2,
-            theme::TEXT_FAINT,
-            theme::ALIGN_FAR,
-        );
-        right_edge -= w + 10.0 * m.scale;
-    }
 
     // TPS (tokens per second).
     if let Some(tps) = row.tps() {
@@ -413,7 +378,7 @@ fn draw_card(
 
     // Retry badge.
     if row.attempt_count > 1 {
-        let label = format!("{} 次重试", row.attempt_count - 1);
+        let label = format!("{}×", row.attempt_count - 1);
         let w = p.dual_measure(&fonts.small, &label) + 6.0;
         p.dual_text(
             &fonts.small,
@@ -432,15 +397,19 @@ fn draw_card(
     let line2_gap = 6.0 * m.scale;
     let mut x = text_x;
 
-    // Model name.
+    // Model name with reasoning effort, e.g. "glm-5.2(max)".
     let model_label = row.served_model();
-    let model_w = p.dual_measure(&fonts.small, model_label).min((right_edge - x).max(0.0));
+    let display = match &row.reasoning_effort {
+        Some(effort) => format!("{}({})", model_label, effort),
+        None => model_label.to_string(),
+    };
+    let display_w = p.dual_measure(&fonts.small, &display).min((right_edge - x).max(0.0));
     p.dual_text(
         &fonts.small,
-        model_label,
+        &display,
         x,
-        y,
-        model_w,
+ y,
+        display_w,
         c.line2,
         if row.is_routed() {
             theme::GOLD
@@ -449,29 +418,11 @@ fn draw_card(
         },
         theme::ALIGN_NEAR,
     );
-    x += model_w + line2_gap;
-
-    // Channel.
-    if let Some(channel) = &row.channel {
-        let w = p.dual_measure(&fonts.small, channel);
-        if x + w < right_edge {
-            p.dual_text(
-                &fonts.small,
-                channel,
-                x,
-                y,
-                w,
-                c.line2,
-                theme::TEXT_DIM,
-                theme::ALIGN_NEAR,
-            );
-            x += w + line2_gap;
-        }
-    }
+    x += display_w + line2_gap;
 
     // Cache hit rate.
     if let Some(rate) = row.cache_hit_rate() {
-        let label = format!("缓 {rate:.2}%");
+        let label = format!("{rate:.2}%");
         let w = p.dual_measure(&fonts.small, &label);
         if x + w < right_edge {
             p.dual_text(
