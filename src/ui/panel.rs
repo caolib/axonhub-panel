@@ -30,8 +30,6 @@ struct CardMetrics {
     radius: f32,
     accent_w: f32,
     accent_inset: f32,
-    /// Heights of small pill-shaped chips (reasoning effort).
-    chip_h: f32,
     /// The gap between the two text lines.
     gap: f32,
 }
@@ -46,7 +44,6 @@ impl CardMetrics {
             radius: CARD_RADIUS * s,
             accent_w: ACCENT_W * s,
             accent_inset: ACCENT_INSET * s,
-            chip_h: 13.0 * s,
             gap: 3.0 * s,
         }
     }
@@ -63,8 +60,6 @@ pub struct ListView<'a> {
     pub selected: Option<usize>,
     pub status_text: Option<(String, bool)>,
     pub user: Option<&'a str>,
-    pub last_refresh: Option<&'a str>,
-    pub paused: bool,
     pub pinned: bool,
 }
 
@@ -89,36 +84,19 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     let s = m.scale;
     let y = 6.0 * s;
 
-    // Right side: active count and total.
+    // Right side: active count and total, split by a separator.
     let active = v.rows.iter().filter(|r| r.status.is_active()).count();
     let right = m.width - m.pad() - 2.0;
 
-    let total_text = format!("共 {}", v.total);
-    p.dual_text(
-        &fonts.small,
-        &total_text,
-        right - 56.0 * s,
-        y,
-        56.0 * s,
-        18.0 * s,
-        theme::TEXT_DIM,
-        theme::ALIGN_FAR,
-    );
-
-    if active > 0 {
-        let dot_x = right - 118.0 * s;
-        round_dot(p, dot_x, y + 6.5 * s, 5.0 * s, theme::BLUE);
-        p.dual_text(
-            &fonts.small,
-            &format!("{active} 进行中"),
-            dot_x + 9.0 * s,
-            y,
-            52.0 * s,
-            18.0 * s,
-            theme::BLUE,
-            theme::ALIGN_NEAR,
-        );
-    }
+    let active_str = active.to_string();
+    let gray_text = if active > 0 {
+        format!(" / {}", v.total)
+    } else {
+        v.total.to_string()
+    };
+    let aw = p.dual_measure(&fonts.small, &active_str);
+    let gw = p.dual_measure(&fonts.small, &gray_text);
+    let right_w = if active > 0 { aw + gw } else { gw };
 
     // Lock icon when window position is pinned.
     let sub_x = if v.pinned {
@@ -134,26 +112,22 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     } else {
         m.pad() + 2.0
     };
-    let sub_right = if active > 0 {
-        right - 128.0 * s
-    } else {
-        right - 62.0 * s
-    };
+    let sub_right = right - right_w - 8.0 * s;
     let sub_w = (sub_right - sub_x).max(0.0);
 
     let mut parts: Vec<String> = Vec::new();
     if let Some(user) = v.user {
         parts.push(user.to_string());
     }
-    if v.paused {
-        parts.push("已暂停".into());
-    }
-    parts.push(format!("显示前 {} 条", v.rows.len()));
+    parts.push(v.rows.len().to_string());
     // Without a footer, the status line shares the subtitle. A failure takes
     // the line over entirely, since it matters more than the usual detail.
     let (text, color) = match &v.status_text {
         Some((message, true)) => (message.clone(), theme::RED),
-        Some((message, false)) => (format!("{}  ·  {}", parts.join("  ·  "), message), theme::GREEN),
+        Some((message, false)) => (
+            format!("{}  ·  {}", parts.join("  ·  "), message),
+            theme::GREEN,
+        ),
         None => (parts.join("  ·  "), theme::TEXT_FAINT),
     };
     p.dual_text(
@@ -164,6 +138,29 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         sub_w,
         18.0 * s,
         color,
+        theme::ALIGN_NEAR,
+    );
+
+    if active > 0 {
+        p.dual_text(
+            &fonts.small,
+            &active_str,
+            right - right_w,
+            y,
+            aw,
+            18.0 * s,
+            theme::BLUE,
+            theme::ALIGN_NEAR,
+        );
+    }
+    p.dual_text(
+        &fonts.small,
+        &gray_text,
+        right - gw,
+        y,
+        gw,
+        18.0 * s,
+        theme::TEXT_DIM,
         theme::ALIGN_NEAR,
     );
 
@@ -252,13 +249,17 @@ fn draw_card(
             line1_y,
             w,
             c.line1,
-            if row.stream { theme::GREEN } else { theme::TEXT_FAINT },
+            if row.stream {
+                theme::WHITE
+            } else {
+                theme::TEXT_FAINT
+            },
             theme::ALIGN_NEAR,
         );
         x += w + mark_gap;
     }
 
-    // Protocol conversion mark: 转 highlighted when converted.
+    // Protocol conversion mark: 转 highlighted when no conversion.
     {
         let w = p.dual_measure(&fonts.body, "转");
         p.dual_text(
@@ -269,9 +270,9 @@ fn draw_card(
             w,
             c.line1,
             if row.protocol().is_converted() {
-                theme::GREEN
-            } else {
                 theme::TEXT_FAINT
+            } else {
+                theme::WHITE
             },
             theme::ALIGN_NEAR,
         );
@@ -289,7 +290,7 @@ fn draw_card(
             w,
             c.line1,
             if row.pass_through {
-                theme::GREEN
+                theme::WHITE
             } else {
                 theme::TEXT_FAINT
             },
@@ -351,13 +352,30 @@ fn draw_card(
         }
     }
 
+    // Tokens.
+    if row.total_tokens > 0 {
+        let tokens = fmt::tokens_compact(row.total_tokens);
+        let w = p.dual_measure(&fonts.small, &tokens);
+        if x + w < badge_limit {
+            p.dual_text(
+                &fonts.small,
+                &tokens,
+                x,
+                line1_y,
+                w,
+                c.line1,
+                theme::TEXT_DIM,
+                theme::ALIGN_NEAR,
+            );
+        }
+    }
+
     y += c.line1 + c.gap;
 
     // --- Line 2: model, cache, tokens, TPS, retry ---
     // Right-aligned items are placed first so the left cluster can be clipped
     // to whatever space remains.
     let mut right_edge = rect.x + rect.w - c.inner_pad;
-
 
     // TPS (tokens per second).
     if let Some(tps) = row.tps() {
@@ -397,19 +415,34 @@ fn draw_card(
     let line2_gap = 6.0 * m.scale;
     let mut x = text_x;
 
-    // Model name with reasoning effort, e.g. "glm-5.2(max)".
+    // Model name with reasoning effort, e.g. "glm-5.2(max)". Drawn on a soft
+    // chip so the served model stands apart from the surrounding metrics.
     let model_label = row.served_model();
     let display = match &row.reasoning_effort {
         Some(effort) => format!("{}({})", model_label, effort),
         None => model_label.to_string(),
     };
-    let display_w = p.dual_measure(&fonts.small, &display).min((right_edge - x).max(0.0));
+    let chip_hpad = 4.0 * m.scale;
+    let chip_vpad = 2.0 * m.scale;
+    let chip_w =
+        (p.dual_measure(&fonts.small, &display) + chip_hpad * 2.0).min((right_edge - x).max(0.0));
+    let text_w = (chip_w - chip_hpad * 2.0).max(0.0);
+    let chip_h = c.line2 + chip_vpad * 2.0;
+    p.round_rect(
+        x,
+        y - chip_vpad,
+        chip_w,
+        chip_h,
+        3.0 * m.scale,
+        theme::BORDER,
+        true,
+    );
     p.dual_text(
         &fonts.small,
         &display,
-        x,
- y,
-        display_w,
+        x + chip_hpad,
+        y,
+        text_w,
         c.line2,
         if row.is_routed() {
             theme::GOLD
@@ -418,7 +451,7 @@ fn draw_card(
         },
         theme::ALIGN_NEAR,
     );
-    x += display_w + line2_gap;
+    x += chip_w + line2_gap;
 
     // Cache hit rate.
     if let Some(rate) = row.cache_hit_rate() {
@@ -439,31 +472,8 @@ fn draw_card(
                 },
                 theme::ALIGN_NEAR,
             );
-            x += w + line2_gap;
         }
     }
-
-    // Tokens.
-    if row.total_tokens > 0 {
-        let tokens = fmt::tokens_compact(row.total_tokens);
-        let w = p.dual_measure(&fonts.small, &tokens);
-        if x + w < right_edge {
-            p.dual_text(
-                &fonts.small,
-                &tokens,
-                x,
-                y,
-                w,
-                c.line2,
-                theme::TEXT_DIM,
-                theme::ALIGN_NEAR,
-            );
-        }
-    }
-}
-
-fn round_dot(p: &Painter, x: f32, y: f32, d: f32, color: u32) {
-    p.round_rect(x, y, d, d, d / 2.0, color, true);
 }
 
 /// Hit-test a point in viewport space.

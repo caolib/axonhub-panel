@@ -58,7 +58,6 @@ pub struct UsageLog {
     pub prompt_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
     pub prompt_cached_tokens: Option<i64>,
-    pub total_cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,8 +146,6 @@ pub struct Row {
     /// Full GUID, e.g. `gid://axonhub/Request/33188`. The detail route validates
     /// the `gid://axonhub/` prefix, so the number alone is not a usable link.
     pub id: String,
-    /// Numeric tail of `id`, shown on the card as `#33188`.
-    pub number: String,
     pub created_at: Option<String>,
     pub status: Status,
     pub model: String,
@@ -169,7 +166,6 @@ pub struct Row {
     pub prompt_tokens: i64,
     pub total_tokens: i64,
     pub cached_tokens: i64,
-    pub cost: Option<f64>,
     /// Number of upstream attempts; above one means retries happened.
     pub attempt_count: i64,
 }
@@ -194,7 +190,6 @@ impl Row {
 
         Row {
             id: req.id.clone(),
-            number: request_number(&req.id),
             created_at: req.created_at.clone(),
             status: Status::parse(req.status.as_deref()),
             model: requested_model,
@@ -224,7 +219,6 @@ impl Row {
             prompt_tokens: usage.and_then(|u| u.prompt_tokens).unwrap_or(0),
             total_tokens: usage.and_then(|u| u.total_tokens).unwrap_or(0),
             cached_tokens: usage.and_then(|u| u.prompt_cached_tokens).unwrap_or(0),
-            cost: usage.and_then(|u| u.total_cost),
             attempt_count: req
                 .executions
                 .as_ref()
@@ -293,11 +287,6 @@ impl Row {
     }
 }
 
-/// `gid://axonhub/Request/33188` -> `33188`.
-pub fn request_number(id: &str) -> String {
-    id.rsplit('/').next().unwrap_or(id).to_string()
-}
-
 /// Deep link to a request's detail page.
 ///
 /// The route matches the whole GUID as a single path segment, so it must be
@@ -356,7 +345,6 @@ mod tests {
     fn row_with(requested: &str, served: Option<&str>) -> Row {
         Row {
             id: format!("gid://axonhub/Request/1"),
-            number: "1".into(),
             created_at: None,
             status: Status::Completed,
             model: requested.to_string(),
@@ -373,7 +361,6 @@ mod tests {
             prompt_tokens: 0,
             total_tokens: 0,
             cached_tokens: 0,
-            cost: None,
             attempt_count: 0,
         }
     }
@@ -385,13 +372,11 @@ mod tests {
         a.upstream_format = Some("openai/chat_completions".into());
         assert!(matches!(a.protocol(), Protocol::Converted { .. }));
         assert!(a.protocol().is_converted());
-        assert_eq!(a.protocol().label().as_deref(), Some("messages→chat"));
 
         let mut b = row_with("m", None);
         b.format = Some("anthropic/messages".into());
         b.upstream_format = Some("anthropic/messages".into());
         assert!(!b.protocol().is_converted());
-        assert_eq!(b.protocol().label().as_deref(), Some("messages"));
     }
 
     #[test]
@@ -404,7 +389,6 @@ mod tests {
 
         let b = row_with("m", None);
         assert_eq!(b.protocol(), Protocol::Unknown);
-        assert_eq!(b.protocol().label(), None);
     }
 
     #[test]
@@ -413,7 +397,10 @@ mod tests {
             name: n.map(str::to_string),
         };
         assert_eq!(named(Some("cc")).non_empty_name().as_deref(), Some("cc"));
-        assert_eq!(named(Some("  cc  ")).non_empty_name().as_deref(), Some("cc"));
+        assert_eq!(
+            named(Some("  cc  ")).non_empty_name().as_deref(),
+            Some("cc")
+        );
         // A blank or absent name yields nothing rather than an empty cell.
         assert_eq!(named(Some("   ")).non_empty_name(), None);
         assert_eq!(named(None).non_empty_name(), None);
@@ -432,11 +419,6 @@ mod tests {
         assert_eq!(plain.served_model(), "glm-5.2");
         assert!(!plain.is_routed());
     }
-
-    #[test]
-    fn number_is_the_tail_of_the_guid() {
-        assert_eq!(request_number("gid://axonhub/Request/33188"), "33188");
-    }
 }
 
 /// Relationship between the protocol the client spoke and the one used upstream.
@@ -445,27 +427,16 @@ pub enum Protocol {
     /// Both known and identical; conversion did not happen.
     Same(String),
     /// Both known and different; AxonHub converted in flight.
-    Converted { from: String, to: String },
+    Converted {
+        from: String,
+        to: String,
+    },
     /// Only one side is known.
     Single(String),
     Unknown,
 }
 
 impl Protocol {
-    /// Compact label: the shared protocol, or `in→out` when converted.
-    pub fn label(&self) -> Option<String> {
-        match self {
-            Protocol::Same(p) => Some(crate::format::format_label(p).to_string()),
-            Protocol::Converted { from, to } => Some(format!(
-                "{}→{}",
-                crate::format::format_label(from),
-                crate::format::format_label(to)
-            )),
-            Protocol::Single(p) => Some(crate::format::format_label(p).to_string()),
-            Protocol::Unknown => None,
-        }
-    }
-
     pub fn is_converted(&self) -> bool {
         matches!(self, Protocol::Converted { .. })
     }
@@ -490,7 +461,6 @@ impl Status {
             _ => Status::Pending,
         }
     }
-
 
     /// Whether the row is still in flight; drives the faster poll cadence.
     pub fn is_active(self) -> bool {

@@ -24,7 +24,10 @@ pub enum Update {
         user: Box<SignInResponse>,
     },
     /// A fresh page of requests.
-    Snapshot { rows: Vec<Row>, total: i64, at: String },
+    Snapshot {
+        rows: Vec<Row>,
+        total: i64,
+    },
     Failed(ApiError),
     /// No usable token; the UI must show the sign-in form.
     SignedOut,
@@ -33,7 +36,9 @@ pub enum Update {
 /// Signals the worker thread accepts.
 #[derive(Debug, Clone)]
 pub enum Command {
-    SignIn { creds: Credentials },
+    SignIn {
+        creds: Credentials,
+    },
     SetToken(String),
     Pause(bool),
     RefreshNow,
@@ -80,7 +85,6 @@ impl Worker {
         }
         out
     }
-
 }
 
 impl Drop for Worker {
@@ -187,11 +191,7 @@ fn run(
                         Ok((requests, total)) => {
                             let rows = crate::client::rows_from(&requests);
                             any_active = rows.iter().any(|r| r.status.is_active());
-                            let _ = updates.send(Update::Snapshot {
-                                rows,
-                                total,
-                                at: crate::report::clock_now(),
-                            });
+                            let _ = updates.send(Update::Snapshot { rows, total });
                             backoff = Duration::ZERO;
                         }
                         Err(err) => {

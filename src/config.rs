@@ -56,6 +56,18 @@ pub struct Config {
     pub token_env_var: String,
     pub always_on_top: bool,
     pub pin_position: bool,
+    pub always_on_bottom: bool,
+    /// Whether `window.width`/`height` are logical (96-DPI) units. Configs
+    /// written before this existed stored device pixels, so an older file has
+    /// this false and its size is converted once, on load, against the scale of
+    /// the monitor it was saved on.
+    pub logical_window: bool,
+    /// Body font size in pixels at the 96-DPI baseline (the authored value is
+    /// 12.5). The whole panel — fonts, cards and the window itself — scales in
+    /// proportion with it, so this is the single knob for how large the text
+    /// reads. Adjustable from the right-click menu (10–24) and clamped to that
+    /// range on load.
+    pub font_size: f32,
     pub window: WindowState,
 }
 
@@ -95,8 +107,11 @@ impl Default for Config {
             row_limit: DEFAULT_ROWS as i64,
             credential_mode: CredentialMode::Token,
             token_env_var: "AXONHUB_ACCESS_TOKEN".into(),
+            font_size: 12.5,
             always_on_top: true,
             pin_position: false,
+            always_on_bottom: false,
+            logical_window: true,
             window: WindowState::default(),
         }
     }
@@ -135,7 +150,10 @@ pub struct Credentials {
 /// `AH_PANEL_HOME` overrides it, for pointing the panel at a different profile.
 /// Defaults to `%APPDATA%\ah-panel`.
 fn base_dir() -> PathBuf {
-    if let Some(dir) = std::env::var("AH_PANEL_HOME").ok().filter(|s| !s.is_empty()) {
+    if let Some(dir) = std::env::var("AH_PANEL_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         return PathBuf::from(dir);
     }
     let root = std::env::var("APPDATA")
@@ -157,10 +175,17 @@ fn credentials_path_in(dir: &Path) -> PathBuf {
 
 impl Config {
     pub fn load() -> Self {
-        std::fs::read_to_string(config_path())
+        let mut config: Config = std::fs::read_to_string(config_path())
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // A hand-edited file may hold NaN, infinity or a value outside the
+        // 10–24 range the menu offers; fall back to the authored 12.5 so a bad
+        // number can never shrink the panel to nothing or blow it up.
+        if !config.font_size.is_finite() || !(10.0..=24.0).contains(&config.font_size) {
+            config.font_size = 12.5;
+        }
+        config
     }
 
     pub fn save(&self) {
@@ -266,11 +291,19 @@ fn clear_stored_in(dir: &Path) {
     let _ = std::fs::remove_file(credentials_path_in(dir));
 }
 
-/// Bring the window back on screen if a display change orphaned it.
-pub fn clamp_to_virtual_screen(state: WindowState, screen: (i32, i32, i32, i32)) -> WindowState {
+/// Bring the window back on screen if a display change orphaned it, shrinking it
+/// to fit the work area when the display got smaller. `state.width`/`height` are
+/// device pixels; the minimums stay usable by scaling the logical floor.
+pub fn clamp_to_virtual_screen(
+    state: WindowState,
+    screen: (i32, i32, i32, i32),
+    scale: f32,
+) -> WindowState {
     let (left, top, right, bottom) = screen;
-    let width = state.width.clamp(320, (right - left).max(320));
-    let height = state.height.clamp(280, (bottom - top).max(280));
+    let min_w = crate::ui::layout::device_px(320, scale);
+    let min_h = crate::ui::layout::device_px(200, scale);
+    let width = state.width.clamp(min_w, (right - left).max(min_w));
+    let height = state.height.clamp(min_h, (bottom - top).max(min_h));
     let x = state.x.clamp(left - 8, (right - width).max(left));
     let y = state.y.clamp(top, (bottom - height).max(top));
     WindowState {
@@ -354,10 +387,8 @@ mod tests {
 
     impl Scratch {
         fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "ah-panel-test-{tag}-{}",
-                std::process::id()
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("ah-panel-test-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Scratch(dir)

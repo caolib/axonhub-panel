@@ -3,11 +3,11 @@
 //! Scroll clamping lives in the UI layer because it depends on the live window
 //! metrics; this module only records intent.
 
+use crate::client::ApiError;
 use crate::config::{Config, Credentials, Stored};
 use crate::model::{self, Row};
-use crate::worker::{Command, Update, Worker};
-use crate::client::ApiError;
 use crate::ui::login::{LoginForm, Method};
+use crate::worker::{Command, Update, Worker};
 
 /// Which surface the panel is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +27,6 @@ pub struct App {
     pub selected: Option<usize>,
     pub paused: bool,
     pub user_name: Option<String>,
-    pub last_refresh: Option<String>,
     /// Transient status line; `true` marks an error presentation.
     pub status: Option<(String, bool)>,
     pub login: Option<LoginForm>,
@@ -38,7 +37,11 @@ pub struct App {
 
 impl App {
     pub fn new(config: Config, token: Option<String>, prefill: Option<Credentials>) -> Self {
-        let view = if token.is_some() { View::List } else { View::Login };
+        let view = if token.is_some() {
+            View::List
+        } else {
+            View::Login
+        };
         let login = (view == View::Login)
             .then(|| LoginForm::new(&config.endpoint, prefill.as_ref(), config.credential_mode));
         App {
@@ -50,7 +53,6 @@ impl App {
             selected: None,
             paused: false,
             user_name: None,
-            last_refresh: None,
             status: None,
             login,
             token,
@@ -60,8 +62,11 @@ impl App {
     }
 
     pub fn open_login(&mut self, message: Option<String>, prefill: Option<Credentials>) {
-        let mut form =
-            LoginForm::new(&self.config.endpoint, prefill.as_ref(), self.config.credential_mode);
+        let mut form = LoginForm::new(
+            &self.config.endpoint,
+            prefill.as_ref(),
+            self.config.credential_mode,
+        );
         form.error = message;
         self.login = Some(form);
         self.view = View::Login;
@@ -78,7 +83,8 @@ impl App {
         for update in updates {
             match update {
                 Update::SignedIn { token, user } => {
-                    let project = crate::client::resolve_project(&user.user, &self.config.project_id);
+                    let project =
+                        crate::client::resolve_project(&user.user, &self.config.project_id);
                     if !project.is_empty() {
                         self.config.project_id = project;
                     }
@@ -105,10 +111,9 @@ impl App {
 
                     worker.send(Command::SetToken(token));
                 }
-                Update::Snapshot { rows, total, at } => {
+                Update::Snapshot { rows, total } => {
                     self.rows = rows;
                     self.total = total;
-                    self.last_refresh = Some(at);
                     if let Some(sel) = self.selected {
                         if sel >= self.rows.len() {
                             self.selected = None;
@@ -120,7 +125,11 @@ impl App {
                     // A token the server rejects is worse than useless: drop any
                     // stored copy so the next launch does not retry it silently.
                     if matches!(err, ApiError::Expired | ApiError::Unauthorized) {
-                        if self.login.as_ref().is_some_and(|f| f.method == Method::Token) {
+                        if self
+                            .login
+                            .as_ref()
+                            .is_some_and(|f| f.method == Method::Token)
+                        {
                             crate::config::clear_stored();
                         }
                     }

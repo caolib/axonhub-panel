@@ -39,7 +39,6 @@ query GetRequests($first: Int, $where: RequestWhereInput, $orderBy: RequestOrder
               totalTokens
               promptCachedTokens
               promptWriteCachedTokens
-              totalCost
             }
           }
         }
@@ -130,7 +129,12 @@ impl Client {
         }
     }
 
-    pub fn sign_in(&self, url: &str, email: &str, password: &str) -> Result<SignInResponse, ApiError> {
+    pub fn sign_in(
+        &self,
+        url: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<SignInResponse, ApiError> {
         let body = json!({ "email": email, "password": password });
         let response = self
             .agent
@@ -214,7 +218,14 @@ impl Client {
         };
 
         let total = data.requests.total_count.unwrap_or(0);
-        Ok((data.requests.edges.into_iter().filter_map(|e| e.node).collect(), total))
+        Ok((
+            data.requests
+                .edges
+                .into_iter()
+                .filter_map(|e| e.node)
+                .collect(),
+            total,
+        ))
     }
 }
 

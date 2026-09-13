@@ -5,8 +5,10 @@
 //! GDI+ objects per call would be pure waste at any cadence.
 
 use windows::Win32::Graphics::Gdi::HDC;
-pub use windows::Win32::Graphics::GdiPlus::{RectF, GpBrush, GpFont, GpFontFamily, GpGraphics, GpPath, GpPen, GpSolidFill, GpStringFormat};
 use windows::Win32::Graphics::GdiPlus::*;
+pub use windows::Win32::Graphics::GdiPlus::{
+    GpBrush, GpFont, GpFontFamily, GpGraphics, GpPath, GpPen, GpSolidFill, GpStringFormat, RectF,
+};
 use windows::core::PCWSTR;
 
 // --- palette (dark theme, aligned with the AxonHub console) ---
@@ -29,9 +31,8 @@ pub const YELLOW: u32 = 0xFFD2_9922;
 /// Marks a request served by a model other than the one requested. Deliberately
 /// brighter and yellower than `YELLOW`, which already means "pending" and "costly".
 pub const GOLD: u32 = 0xFFE8_B33A;
-/// Marks a streaming request. Muted, because streaming is the common case and
-/// should not compete with the status bar or the routing gold.
-pub const BROWN: u32 = 0xFFB0_8A62;
+/// Bright, unambiguous highlight for the 流 / 转 / 透 marks.
+pub const WHITE: u32 = 0xFF_FF_FF_FF;
 
 /// The single colour that encodes a request's state in the list.
 pub fn status_color(status: crate::model::Status) -> u32 {
@@ -95,17 +96,6 @@ pub struct Fonts {
 // GDI+ objects are only ever touched from the UI thread.
 unsafe impl Send for Fonts {}
 
-/// Fall back to another family when this lookup came back empty.
-trait OrElse {
-    fn pipe_fallback(self, next: impl FnOnce() -> *mut GpFontFamily) -> *mut GpFontFamily;
-}
-
-impl OrElse for *mut GpFontFamily {
-    fn pipe_fallback(self, next: impl FnOnce() -> *mut GpFontFamily) -> *mut GpFontFamily {
-        if self.is_null() { next() } else { self }
-    }
-}
-
 /// First family in `names` that the system can resolve, or null if none can.
 fn pick(names: &[&str]) -> *mut GpFontFamily {
     for name in names {
@@ -121,7 +111,8 @@ fn family(name: &str) -> *mut GpFontFamily {
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     let mut out: *mut GpFontFamily = std::ptr::null_mut();
     unsafe {
-        if GdipCreateFontFamilyFromName(PCWSTR(wide.as_ptr()), std::ptr::null_mut(), &mut out).0 != 0
+        if GdipCreateFontFamilyFromName(PCWSTR(wide.as_ptr()), std::ptr::null_mut(), &mut out).0
+            != 0
         {
             return std::ptr::null_mut();
         }
@@ -229,7 +220,6 @@ impl Painter {
         }
     }
 
-
     pub fn round_rect(&self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: u32, fill: bool) {
         if w <= 0.0 || h <= 0.0 {
             return;
@@ -287,7 +277,16 @@ impl Painter {
         if runs.len() == 1 {
             // The common case: nothing to align, draw straight through.
             let (text, cjk) = runs[0];
-            self.text(if cjk { font.cjk } else { font.latin }, text, x, y, w, h, color, align);
+            self.text(
+                if cjk { font.cjk } else { font.latin },
+                text,
+                x,
+                y,
+                w,
+                h,
+                color,
+                align,
+            );
             return;
         }
 
@@ -301,7 +300,12 @@ impl Painter {
             _ => x,
         };
         // Clip so a run cannot spill past the cell when the text is too long.
-        let clip = RectF { X: x, Y: y, Width: w, Height: h };
+        let clip = RectF {
+            X: x,
+            Y: y,
+            Width: w,
+            Height: h,
+        };
         self.clip(clip);
         for (text, cjk) in runs {
             let face = if cjk { font.cjk } else { font.latin };
@@ -416,7 +420,6 @@ impl Drop for Painter {
     }
 }
 
-
 /// Split `s` into maximal runs of CJK and non-CJK, in order.
 ///
 /// CJK detection is by code point range rather than by font query: it avoids a
@@ -482,10 +485,7 @@ mod tests {
     #[test]
     fn mixed_text_alternates_runs() {
         // The label shape the panel actually draws.
-        assert_eq!(
-            runs("缓存 99.5%"),
-            vec![("缓存", true), (" 99.5%", false)]
-        );
+        assert_eq!(runs("缓存 99.5%"), vec![("缓存", true), (" 99.5%", false)]);
         // The space after a digit stays with the Latin run; it is only the
         // run boundaries that matter for the face, not which side the space
         // lands on.
@@ -511,6 +511,9 @@ mod tests {
 
     #[test]
     fn leading_and_trailing_spaces_stay_with_their_run() {
-        assert_eq!(runs(" 完成 "), vec![(" ", false), ("完成", true), (" ", false)]);
+        assert_eq!(
+            runs(" 完成 "),
+            vec![(" ", false), ("完成", true), (" ", false)]
+        );
     }
 }

@@ -93,7 +93,11 @@ impl LoginForm {
 
     /// The pasted token, with any `Bearer ` prefix and whitespace removed.
     pub fn trimmed_token(&self) -> String {
-        self.token.trim().trim_start_matches("Bearer ").trim().to_string()
+        self.token
+            .trim()
+            .trim_start_matches("Bearer ")
+            .trim()
+            .to_string()
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -128,7 +132,6 @@ impl LoginForm {
         Ok(())
     }
 
-
     /// The text field currently receiving keystrokes.
     fn focused_text(&mut self) -> Option<&mut String> {
         match self.focus {
@@ -143,7 +146,11 @@ impl LoginForm {
     /// Maximum characters the focused field accepts. Endpoint and email have no
     /// legitimate need for long input; a JWT is a few hundred characters.
     fn char_limit(&self) -> usize {
-        if self.focus == Field::Token { 4096 } else { 256 }
+        if self.focus == Field::Token {
+            4096
+        } else {
+            256
+        }
     }
 
     pub fn insert(&mut self, ch: char) {
@@ -181,7 +188,6 @@ impl LoginForm {
         self.error = None;
     }
 
-
     /// Empty the focused field. The panel has no selection model, so Ctrl+A /
     /// Ctrl+X are treated as "replace this value".
     pub fn clear_focused(&mut self) {
@@ -200,7 +206,12 @@ impl LoginForm {
 
     pub fn focus_next(&mut self, backwards: bool) {
         let order: &[Field] = match self.method {
-            Method::Password => &[Field::Endpoint, Field::Email, Field::Password, Field::Remember],
+            Method::Password => &[
+                Field::Endpoint,
+                Field::Email,
+                Field::Password,
+                Field::Remember,
+            ],
             Method::Token => &[Field::Endpoint, Field::Token, Field::Remember],
         };
         let index = order.iter().position(|f| *f == self.focus).unwrap_or(0);
@@ -213,8 +224,6 @@ impl LoginForm {
         self.focus = order[next];
         self.caret_on = true;
     }
-
-
 }
 
 /// Geometry of the sign-in form, recomputed per paint. The password and token
@@ -278,19 +287,18 @@ pub fn layout(form: &LoginForm, m: Metrics) -> LoginLayout {
     ];
     let mut y = tab_y + tab_h + 16.0 * s;
     let mut fields = Vec::with_capacity(3);
-    let push =
-        |fields: &mut Vec<(Rect, &'static str)>, label: &'static str, y: &mut f32| {
-            fields.push((
-                Rect {
-                    x: inner_x,
-                    y: *y + label_h,
-                    w: inner_w,
-                    h: field_h,
-                },
-                label,
-            ));
-            *y += label_h + field_h + field_gap;
-        };
+    let push = |fields: &mut Vec<(Rect, &'static str)>, label: &'static str, y: &mut f32| {
+        fields.push((
+            Rect {
+                x: inner_x,
+                y: *y + label_h,
+                w: inner_w,
+                h: field_h,
+            },
+            label,
+        ));
+        *y += label_h + field_h + field_gap;
+    };
 
     push(&mut fields, "AxonHub 地址", &mut y);
     if has_credentials {
@@ -330,7 +338,6 @@ pub fn layout(form: &LoginForm, m: Metrics) -> LoginLayout {
     }
 }
 
-
 /// Draw a rounded text input, returning nothing; the caret is drawn by callers
 /// that know the field is focused.
 #[allow(clippy::too_many_arguments)]
@@ -352,7 +359,11 @@ fn text_field(
         rect.y - rect.h * (LABEL_H / FIELD_H),
         rect.w,
         rect.h * (LABEL_H / FIELD_H),
-        if focused { theme::MAUVE } else { theme::TEXT_DIM },
+        if focused {
+            theme::MAUVE
+        } else {
+            theme::TEXT_DIM
+        },
         theme::ALIGN_NEAR,
     );
 
@@ -406,12 +417,23 @@ fn text_field(
             theme::ALIGN_NEAR,
         );
         if focused && caret_on {
-            let caret_x =
-                (text_x + measured.min(text_w) + 1.0).min(rect.x + rect.w - 6.0 * s);
-            p.fill_rect(caret_x, rect.y + 7.0 * s, 1.5 * s, rect.h - 14.0 * s, theme::MAUVE);
+            let caret_x = (text_x + measured.min(text_w) + 1.0).min(rect.x + rect.w - 6.0 * s);
+            p.fill_rect(
+                caret_x,
+                rect.y + 7.0 * s,
+                1.5 * s,
+                rect.h - 14.0 * s,
+                theme::MAUVE,
+            );
         }
     } else if focused && caret_on {
-        p.fill_rect(text_x, rect.y + 7.0 * s, 1.5 * s, rect.h - 14.0 * s, theme::MAUVE);
+        p.fill_rect(
+            text_x,
+            rect.y + 7.0 * s,
+            1.5 * s,
+            rect.h - 14.0 * s,
+            theme::MAUVE,
+        );
     }
 }
 
@@ -421,7 +443,15 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
     let inset = 18.0 * s;
 
     p.fill_rect(0.0, 0.0, m.width, m.height, theme::BG);
-    p.round_rect(l.card.x, l.card.y, l.card.w, l.card.h, 10.0 * s, theme::CARD, true);
+    p.round_rect(
+        l.card.x,
+        l.card.y,
+        l.card.w,
+        l.card.h,
+        10.0 * s,
+        theme::CARD,
+        true,
+    );
 
     p.dual_text(
         &fonts.bold,
@@ -465,14 +495,22 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
             rect.y,
             rect.w,
             rect.h,
-            if selected { theme::TEXT } else { theme::TEXT_DIM },
+            if selected {
+                theme::TEXT
+            } else {
+                theme::TEXT_DIM
+            },
             theme::ALIGN_CENTER,
         );
     }
 
     let values: [&str; 3] = [&form.endpoint, &form.email, &form.password];
     let kinds = [Field::Endpoint, Field::Email, Field::Password];
-    let token_index = if form.method == Method::Password { 3 } else { 1 };
+    let token_index = if form.method == Method::Password {
+        3
+    } else {
+        1
+    };
 
     for (i, (rect, label)) in l.fields.iter().enumerate() {
         let is_token = i == token_index && form.method == Method::Token;
@@ -508,7 +546,11 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
         l.mode_select.y,
         160.0 * s,
         l.mode_select.h,
-        if mode_focused { theme::MAUVE } else { theme::TEXT_DIM },
+        if mode_focused {
+            theme::MAUVE
+        } else {
+            theme::TEXT_DIM
+        },
         theme::ALIGN_NEAR,
     );
     p.dual_text(
@@ -521,7 +563,6 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
         theme::TEXT_FAINT,
         theme::ALIGN_FAR,
     );
-
 
     p.dual_text(
         &fonts.small,
@@ -551,7 +592,11 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
         l.button.y,
         l.button.w,
         l.button.h,
-        if enabled { theme::TEXT } else { theme::TEXT_FAINT },
+        if enabled {
+            theme::TEXT
+        } else {
+            theme::TEXT_FAINT
+        },
         theme::ALIGN_CENTER,
     );
 
@@ -567,7 +612,6 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
             theme::ALIGN_NEAR,
         );
     }
-
 }
 
 /// Map a click to a form control.
@@ -609,7 +653,6 @@ fn field_for(method: Method, index: usize) -> Field {
         (Method::Token, _) => Field::Token,
     }
 }
-
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {

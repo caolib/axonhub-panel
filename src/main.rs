@@ -7,49 +7,48 @@ mod client;
 mod config;
 mod format;
 mod model;
-mod report;
-mod token;
 mod theme;
 mod time;
+mod token;
 mod ui;
 mod worker;
 
 use std::cell::RefCell;
 
-
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush, DeleteDC,
-    DeleteObject, EndPaint, FillRect, GetMonitorInfoW, HGDIOBJ, InvalidateRect,
-    MonitorFromWindow, SelectObject, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SRCCOPY,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, CreateSolidBrush,
+    DeleteDC, DeleteObject, EndPaint, FillRect, GetDeviceCaps, GetMonitorInfoW, HGDIOBJ, HORZSIZE,
+    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromPoint,
+    MonitorFromWindow, PAINTSTRUCT, SRCCOPY, SelectObject, VERTSIZE,
 };
 use windows::Win32::Graphics::GdiPlus::{
     GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GdiplusStartupOutput,
 };
-use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow};
-use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
+use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, SetFocus, VK_A, VK_C, VK_CONTROL, VK_V, VK_X,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_BACK, VK_ESCAPE, VK_RETURN, VK_TAB,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::System::DataExchange::{
-    CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-};
-use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
-use windows::Win32::System::Ole::CF_UNICODETEXT;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SetFocus, VK_A, VK_C, VK_CONTROL, VK_V, VK_X,
-};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, *,
 };
 use windows::core::PCWSTR;
 
 use app::{App, View};
-use time::now_unix;
 use config::{Config, CredentialMode, Credentials, Stored, WindowState};
 use theme::{Fonts, Painter};
+use time::now_unix;
 use ui::layout::Metrics;
 use ui::login::{self, Action as LoginAction, Field, Method};
 use ui::panel::{self, ListView};
@@ -128,6 +127,68 @@ fn clamp_scroll(hwnd: HWND) {
     });
 }
 
+/// Refit the window when the monitor under it changes *without* a Windows DPI
+/// change.
+///
+/// `WM_DPICHANGED` only fires when the system's per-monitor DPI setting
+/// differs between two screens, so dragging the panel between two
+/// 100%-scaled monitors of different pixels-per-inch would otherwise leave it
+/// the wrong size. This recomputes the physical-density scale, reloads the
+/// fonts and resizes the window by the scale ratio, mirroring the
+/// `WM_DPICHANGED` path minus its suggested rectangle (the move that triggered
+/// this has already placed the window). It is a no-op when the scale is
+/// unchanged, so it is cheap to call on every `WM_MOVE`.
+fn sync_scale(hwnd: HWND) {
+    let scale = window_scale(hwnd);
+    let old = State::with(|s| s.scale).unwrap_or(scale);
+    if (scale - old).abs() <= 0.01 {
+        return;
+    }
+    State::with(|s| {
+        s.fonts = Fonts::load(scale);
+        s.scale = scale;
+    });
+
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut rc);
+    }
+    let ratio = if old > 0.0 { scale / old } else { 1.0 };
+    let width = ((rc.right - rc.left) as f32 * ratio).round() as i32;
+    let mut height = ((rc.bottom - rc.top) as f32 * ratio).round() as i32;
+
+    // Whole cards only: derive the height from the row count so no partial
+    // card is left over, and keep the panel inside this monitor's work area.
+    let work = work_area_for(hwnd);
+    let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale).min(work.3 - work.1);
+    if fitted > 0 {
+        height = fitted;
+    }
+    let placed = config::clamp_to_virtual_screen(
+        WindowState {
+            x: rc.left,
+            y: rc.top,
+            width,
+            height,
+        },
+        work,
+        scale,
+    );
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            placed.x,
+            placed.y,
+            placed.width,
+            placed.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    clamp_scroll(hwnd);
+    invalidate(hwnd);
+}
+
 /// The row count configured by the user (derived from the window height).
 fn config_rows(hwnd: HWND) -> usize {
     let _ = hwnd;
@@ -141,7 +202,7 @@ fn current_visible_rows(hwnd: HWND) -> usize {
         let _ = GetClientRect(hwnd, &mut rc);
     }
     let height = (rc.bottom - rc.top) as f32;
-    ui::layout::rows_in_height(height, dpi_scale(hwnd))
+    ui::layout::rows_in_height(height, window_scale(hwnd))
 }
 
 /// Context-menu command ids.
@@ -152,11 +213,15 @@ const MENU_OPEN: usize = 1101;
 const MENU_TOPMOST: usize = 1200;
 const MENU_CLEAR_CREDS: usize = 1201;
 const MENU_PIN_POSITION: usize = 1202;
+const MENU_BOTTOMMOST: usize = 1203;
 const MENU_ROWS_5: usize = 1400;
 const MENU_ROWS_10: usize = 1401;
 const MENU_ROWS_15: usize = 1402;
 const MENU_ROWS_20: usize = 1403;
 const MENU_QUIT: usize = 1300;
+/// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` = 24 px.
+const MENU_FONT_BASE: usize = 1500;
+const MENU_FONT_MAX: usize = MENU_FONT_BASE + 14;
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -169,6 +234,12 @@ struct State {
     /// Whether the window currently lacks `WS_EX_NOACTIVATE`, i.e. can take
     /// keyboard focus. Mirrors `app.is_login()`.
     activatable: bool,
+    /// Draw scale (monitor physical density × `config.fontSize` / 12.5) the
+    /// `fonts` were built for. Tracked so a monitor change can tell how much
+    /// to grow the window: the panel's size is the same in logical units on
+    /// every monitor, so device pixels must change by the ratio of the two
+    /// scales.
+    scale: f32,
 }
 
 impl State {
@@ -278,7 +349,6 @@ fn hit_test(m: Metrics, x: f32, y: f32) -> isize {
     }
 }
 
-
 fn metrics_for(hwnd: HWND) -> Metrics {
     let mut rc = RECT::default();
     unsafe {
@@ -287,23 +357,86 @@ fn metrics_for(hwnd: HWND) -> Metrics {
     Metrics::new(
         (rc.right - rc.left) as f32,
         (rc.bottom - rc.top) as f32,
-        dpi_scale(hwnd),
+        window_scale(hwnd),
     )
 }
 
-/// DPI scale relative to the 96-DPI baseline GDI+ fonts are authored at.
-fn dpi_scale(hwnd: HWND) -> f32 {
+/// Windows' per-monitor DPI setting as a scale over the 96-DPI baseline GDI+
+/// fonts are authored at. This is the system's *guess* at density and is used
+/// only as a fallback when a monitor reports no usable physical size.
+fn windows_dpi_scale(hwnd: HWND) -> f32 {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
+}
+
+/// Scale that keeps the panel the same *physical* size on whichever monitor it
+/// sits on, so two screens with the same Windows scaling but different
+/// pixels-per-inch no longer leave the panel too small on the denser one.
+///
+/// The scale is the monitor's physical density (device pixels per screen inch,
+/// from the EDID-reported glass size) over the 96-DPI authoring baseline, then
+/// multiplied by `config.fontSize / 12.5` so the whole panel tracks the
+/// user-chosen body font size. `GetDpiForWindow` is the fallback when the
+/// driver reports no usable EDID.
+fn window_scale(hwnd: HWND) -> f32 {
+    // `font_size` is the body font in px at the 96-DPI baseline (authored
+    // 12.5); scaling by `font_size / 12.5` keeps the whole panel in proportion
+    // with the user-chosen text size.
+    let tuner = State::with(|s| s.app.config.font_size).unwrap_or(12.5) / 12.5;
+    let scale = monitor_density(hwnd)
+        .map(|d| d * tuner)
+        .unwrap_or_else(|| windows_dpi_scale(hwnd) * tuner);
+    scale.clamp(0.25, 8.0)
+}
+
+/// Physical-density scale for the monitor nearest `hwnd`, or `None` when the
+/// driver reports no usable EDID size (the common case for which `window_scale`
+/// falls back to the Windows DPI guess).
+fn monitor_density(hwnd: HWND) -> Option<f32> {
+    unsafe {
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if !GetMonitorInfoW(hmon, &mut info.monitorInfo).as_bool() {
+            return None;
+        }
+        let rc = info.monitorInfo.rcMonitor;
+        let px_w = rc.right - rc.left;
+        let px_h = rc.bottom - rc.top;
+        // szDevice holds the adapter path (`\\.\DISPLAY1`); CreateDC's driver
+        // argument accepts it directly, and a DC on that device reports the
+        // monitor's own physical dimensions via GetDeviceCaps.
+        if info.szDevice[0] == 0 {
+            return None;
+        }
+        let hdc = CreateDCW(
+            PCWSTR(info.szDevice.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            None,
+        );
+        if hdc.is_invalid() {
+            return None;
+        }
+        let mm_w = GetDeviceCaps(Some(hdc), HORZSIZE) as f32;
+        let mm_h = GetDeviceCaps(Some(hdc), VERTSIZE) as f32;
+        let _ = DeleteDC(hdc);
+        ui::layout::physical_scale(px_w, px_h, mm_w, mm_h)
+    }
 }
 
 fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         // Dark Win32 menus: load SetPreferredAppMode from uxtheme.dll.
-        let uxtheme: Vec<u16> = "uxtheme.dll".encode_utf16().chain(std::iter::once(0)).collect();
+        let uxtheme: Vec<u16> = "uxtheme.dll"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         if let Ok(h) = GetModuleHandleW(PCWSTR(uxtheme.as_ptr())) {
-            if let Some(proc) = GetProcAddress(h, windows::core::PCSTR(b"SetPreferredAppMode\0".as_ptr())) {
+            if let Some(proc) =
+                GetProcAddress(h, windows::core::PCSTR(b"SetPreferredAppMode\0".as_ptr()))
+            {
                 let func: unsafe extern "system" fn(u32) -> i32 = std::mem::transmute(proc);
                 func(3); // AllowDark
             }
@@ -345,7 +478,12 @@ fn main() {
                     .as_ref()
                     .or(stored_token.as_ref())
                     .filter(|t| token::is_expired(t, now_unix()))
-                    .map(|t| format!("访问令牌已过期({}),请重新获取", token::describe(t, now_unix())))
+                    .map(|t| {
+                        format!(
+                            "访问令牌已过期({}),请重新获取",
+                            token::describe(t, now_unix())
+                        )
+                    })
             })
             .flatten();
 
@@ -394,6 +532,7 @@ fn main() {
             worker,
             fonts: Fonts::load(1.0),
             activatable: wants_focus,
+            scale: 1.0,
         };
         STATE.with(|s| *s.borrow_mut() = Some(state));
 
@@ -405,22 +544,44 @@ fn main() {
         if !wants_focus {
             ex_style |= WS_EX_NOACTIVATE;
         }
-        if config.always_on_top {
+        if config.always_on_top && !config.always_on_bottom {
             ex_style |= WS_EX_TOPMOST;
         }
 
-        let state = clamp_window(config.window);
-        let cls = CLASS_NAME.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
-        let title = "AxonHub 请求面板".encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        // Create at the saved position with the saved size as a provisional
+        // guess. The size that is actually correct depends on the DPI of the
+        // monitor the window lands on, and that is only known once the window
+        // exists (`GetDpiForWindow`); `GetDpiForMonitor` is deprecated and
+        // returns 1.0 for a per-monitor-DPI-aware process, which is why
+        // resolving the scale before creation does not work. So: create, read
+        // the real scale, then resize to logical x scale.
+        let saved = config.window;
+        let saved_was_logical = config.logical_window;
+        let provisional = if saved.x < 0 && saved.y < 0 {
+            // First run: near the top-right of the primary work area. Moved to
+            // the exact edge below, once the real size is known.
+            let work = work_area_at(0, 0);
+            (work.2 - saved.width - 24, work.1 + 24)
+        } else {
+            (saved.x, saved.y)
+        };
+        let cls = CLASS_NAME
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+        let title = "AxonHub 请求面板"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
         let Ok(hwnd) = CreateWindowExW(
             ex_style,
             PCWSTR(cls.as_ptr()),
             PCWSTR(title.as_ptr()),
             style,
-            state.x,
-            state.y,
-            state.width,
-            state.height,
+            provisional.0,
+            provisional.1,
+            saved.width,
+            saved.height,
             None,
             None,
             Some(instance.into()),
@@ -432,32 +593,68 @@ fn main() {
 
         // Per-monitor DPI: fonts were authored for 96 DPI, so scale them to the
         // monitor the window actually landed on.
-        let scale = dpi_scale(hwnd);
-        State::with(|s| s.fonts = Fonts::load(scale));
+        let scale = window_scale(hwnd);
+        State::with(|s| {
+            s.fonts = Fonts::load(scale);
+            s.scale = scale;
+        });
 
         // Rounded corners and a dark title-less frame on Windows 11.
         apply_window_chrome(hwnd);
 
-        // Snap the restored height to whole cards so the window does not open
-        // with a partial card along the bottom, and keep it inside the work
-        // area so it can never extend below the screen.
-        let work = work_area();
-        let fitted = ui::layout::height_for_rows(
-            config.row_limit.max(1) as usize,
-            dpi_scale(hwnd),
-        )
-        .min(work.3 - work.1);
-        if fitted != state.height {
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                0,
-                0,
-                state.width,
-                fitted,
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-            );
+        // The size is logical from here on; record that so the one-time
+        // conversion above is never repeated.
+        if !saved_was_logical {
+            State::with(|s| {
+                s.app.config.logical_window = true;
+                s.app.save();
+            });
         }
+
+        // Now that the scale is known, size the window so the panel is the same
+        // apparent size on this monitor as on any other: the logical size times
+        // the scale, with the height snapped to whole cards and clamped to the
+        // work area so it can never extend below the screen.
+        //
+        // A config written before `logicalWindow` existed holds device pixels
+        // measured on whatever monitor it was last saved on. Convert it once
+        // here, where that monitor's scale is known (it is the one the window
+        // just landed on); afterwards the file is written back in logical units.
+        let logical_width = if saved_was_logical {
+            saved.width
+        } else {
+            ui::layout::logical_px(saved.width.max(1), scale)
+        };
+        let work = work_area_for(hwnd);
+        let width = ui::layout::device_px(logical_width, scale);
+        let height = ui::layout::height_for_rows(config.row_limit.max(1) as usize, scale)
+            .min(work.3 - work.1);
+        let (x, y) = if saved.x < 0 && saved.y < 0 {
+            // First run: pin to the top-right of the primary work area now that
+            // the real width is known.
+            (work.2 - width - 24, work.1 + 24)
+        } else {
+            (provisional.0, provisional.1)
+        };
+        let placed = config::clamp_to_virtual_screen(
+            WindowState {
+                x,
+                y,
+                width,
+                height,
+            },
+            work,
+            scale,
+        );
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            placed.x,
+            placed.y,
+            placed.width,
+            placed.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
 
         let _ = ShowWindow(
             hwnd,
@@ -488,22 +685,36 @@ fn main() {
     }
 }
 
-/// Keep the restored position inside the current work area.
-fn clamp_window(state: WindowState) -> WindowState {
-    if state.x < 0 && state.y < 0 {
-        // First run: park it at the top-right of the primary work area.
-        let work = work_area();
-        let x = work.2 - state.width - 24;
-        let y = work.1 + 24;
-        return WindowState { x, y, ..state };
+/// Work area of the monitor `hwnd` currently sits on.
+///
+/// A null `HWND` would make `MonitorFromWindow` answer for the *primary*
+/// monitor, which is wrong the moment the panel lives on a second screen: the
+/// saved size would be clamped against the wrong work area and the panel would
+/// snap back to the primary monitor on every launch.
+fn work_area_for(hwnd: HWND) -> (i32, i32, i32, i32) {
+    unsafe {
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(hmon, &mut info).as_bool() {
+            return (
+                info.rcWork.left,
+                info.rcWork.top,
+                info.rcWork.right,
+                info.rcWork.bottom,
+            );
+        }
     }
-    let work = work_area();
-    config::clamp_to_virtual_screen(state, work)
+    (0, 0, 1920, 1080)
 }
 
-fn work_area() -> (i32, i32, i32, i32) {
+/// Work area of the monitor containing a screen point, for clamping a position
+/// that has not been applied to a window yet.
+fn work_area_at(x: i32, y: i32) -> (i32, i32, i32, i32) {
     unsafe {
-        let hmon = MonitorFromWindow(HWND::default(), MONITOR_DEFAULTTONEAREST);
+        let hmon = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
@@ -521,9 +732,7 @@ fn work_area() -> (i32, i32, i32, i32) {
 }
 
 fn apply_window_chrome(hwnd: HWND) {
-    use windows::Win32::Graphics::Dwm::{
-        DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute,
-    };
+    use windows::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute};
     unsafe {
         // DWMWCP_ROUND: match the rounded cards inside the panel.
         let preference: i32 = 2;
@@ -571,7 +780,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let m = Metrics::new(
                 (rc.right - rc.left) as f32,
                 (rc.bottom - rc.top) as f32,
-                dpi_scale(hwnd),
+                window_scale(hwnd),
             );
 
             return LRESULT(hit_test(m, x, y));
@@ -586,13 +795,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             let m = Metrics::new(
                 (rc.right - rc.left) as f32,
                 (rc.bottom - rc.top) as f32,
-                dpi_scale(hwnd),
+                window_scale(hwnd),
             );
             let local_x = (cursor.x - rc.left) as f32;
             let local_y = (cursor.y - rc.top) as f32;
+            let pinned = State::with(|s| s.app.config.pin_position).unwrap_or(false);
             let shape = match edge_at(m, local_x, local_y) {
                 Some(edge) => edge.cursor_id(),
-                None if hit_test(m, local_x, local_y) == HTCLIENT as isize => IDC_HAND,
+                // The hand signals "this is clickable"; pinned mode is not, so
+                // show an arrow even where `hit_test` reports `HTCLIENT`.
+                None if !pinned && hit_test(m, local_x, local_y) == HTCLIENT as isize => IDC_HAND,
                 None => IDC_ARROW,
             };
             if let Ok(handle) = unsafe { LoadCursorW(None, shape) } {
@@ -605,7 +817,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_GETMINMAXINFO => {
             // Keep the panel usable: wide enough for the metric row, tall enough
             // for the header and a couple of cards, in device pixels.
-            let scale = dpi_scale(hwnd);
+            let scale = window_scale(hwnd);
             let info = unsafe { &mut *(lp.0 as *mut MINMAXINFO) };
             info.ptMinTrackSize = POINT {
                 x: (320.0 * scale) as i32,
@@ -623,6 +835,19 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             });
             actions.push(Action::Save);
             actions.push(Action::RefreshRowCount(rows));
+        }
+        WM_WINDOWPOSCHANGING => {
+            // Keep the panel pinned to the bottom of the Z order when enabled:
+            // any attempt to raise it is redirected to HWND_BOTTOM so it never
+            // floats above other windows.
+            if State::with(|s| s.app.config.always_on_bottom).unwrap_or(false) {
+                let wp = lp.0 as *mut WINDOWPOS;
+                if !wp.is_null() {
+                    unsafe {
+                        (*wp).hwndInsertAfter = HWND_BOTTOM;
+                    }
+                }
+            }
         }
         WM_ERASEBKGND => {}
         WM_TIMER => on_timer(hwnd, wp.0, &mut actions),
@@ -644,49 +869,68 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_KEYDOWN | WM_CHAR | WM_SYSKEYDOWN => on_key(hwnd, msg, wp, &mut actions),
         WM_DPICHANGED => {
             // Dragging the panel between monitors of different scale changes how
-            // large everything must be drawn. Fonts are rebuilt from the new
-            // scale and Metrics picks it up per frame, so the layout follows;
-            // the height is also re-fitted to keep whole cards on screen.
-            let scale = dpi_scale(hwnd);
-            State::with(|s| s.fonts = Fonts::load(scale));
+            // large everything must be drawn. The layout is authored in logical
+            // units and `Metrics` multiplies by the scale per frame, so the
+            // *window* has to grow by the same factor or the panel would render
+            // a 1.5x layout inside an unscaled box and look cramped on the
+            // high-DPI screen. Width and height are both rescaled from the
+            // previous scale, then the height is snapped to whole cards.
+            let old_scale = State::with(|s| s.scale).unwrap_or(1.0);
+            let scale = window_scale(hwnd);
+            let ratio = if old_scale > 0.0 {
+                scale / old_scale
+            } else {
+                1.0
+            };
+            State::with(|s| {
+                s.fonts = Fonts::load(scale);
+                s.scale = scale;
+            });
 
-            if lp.0 != 0 {
-                let suggested = unsafe { &*(lp.0 as *const RECT) };
-                let _ = unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        None,
-                        suggested.left,
-                        suggested.top,
-                        suggested.right - suggested.left,
-                        suggested.bottom - suggested.top,
-                        SWP_NOZORDER | SWP_NOACTIVATE,
-                    )
-                };
-            }
-
-            let height = ui::layout::height_for_rows(config_rows(hwnd), scale);
-            let work = work_area();
-            let height = height.min(work.3 - work.1);
             let mut rc = RECT::default();
             unsafe {
                 let _ = GetWindowRect(hwnd, &mut rc);
             }
-            if height != rc.bottom - rc.top {
-                unsafe {
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        0,
-                        0,
-                        rc.right - rc.left,
-                        height,
-                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                }
+            let (mut x, mut y) = (rc.left, rc.top);
+            let width = ((rc.right - rc.left) as f32 * ratio).round() as i32;
+            let mut height = ((rc.bottom - rc.top) as f32 * ratio).round() as i32;
+
+            // The suggested rectangle carries the new position; take it so the
+            // window lands where Windows wants it on the new monitor.
+            if lp.0 != 0 {
+                let suggested = unsafe { &*(lp.0 as *const RECT) };
+                x = suggested.left;
+                y = suggested.top;
+            }
+
+            // Whole cards only: derive the height from the row count instead of
+            // trusting the scaled pixel value, so no partial card is left over.
+            let work = work_area_at(x, y);
+            let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale).min(work.3 - work.1);
+            if fitted > 0 {
+                height = fitted;
+            }
+
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    x,
+                    y,
+                    width,
+                    height,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
             }
             clamp_scroll(hwnd);
             invalidate(hwnd);
+        }
+        WM_MOVE => sync_scale(hwnd),
+        WM_DISPLAYCHANGE => {
+            // A resolution or monitor-configuration change can alter the
+            // physical density of the screen the panel sits on without a
+            // Windows DPI change, so recompute the scale and refit.
+            sync_scale(hwnd);
         }
         WM_COMMAND => on_command(wp, &mut actions),
         WM_CLOSE => actions.push(Action::Quit),
@@ -718,12 +962,17 @@ enum Action {
     OpenUrl(String),
     /// Apply an always-on-top change to the live window.
     SetTopmost(bool),
+    /// Pin the window to the bottom of the Z order; mutually exclusive with topmost.
+    SetBottom(bool),
     /// Re-read credentials from disk to prefill the form.
     OpenLogin(Option<String>),
     /// The window was resized by hand; fetch this many rows.
     RefreshRowCount(usize),
     /// Change the row count from the menu and resize the window to fit.
     ResizeToRows(usize),
+    /// Change the body font size from the menu and refit the window; the whole
+    /// panel scales with it.
+    SetFontSize(f32),
     /// Toggle `WS_EX_NOACTIVATE` so the window can (or cannot) take focus.
     SetActivatable(bool),
     ClearCredentials,
@@ -739,11 +988,9 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
     while let Some(action) = actions.pop() {
         match action {
             Action::Redraw => invalidate(hwnd),
-            Action::Quit => {
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-            }
+            Action::Quit => unsafe {
+                let _ = DestroyWindow(hwnd);
+            },
             Action::Save => save_window_state(hwnd),
             Action::ShowMenu => show_menu(hwnd),
             Action::SignIn => submit_login(hwnd),
@@ -754,6 +1001,28 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                     let _ = SetWindowPos(
                         hwnd,
                         Some(insert_after),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                }
+            }
+            Action::SetBottom(on) => {
+                State::with(|s| s.app.config.always_on_bottom = on);
+                unsafe {
+                    if on {
+                        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                        let _ = SetWindowLongPtrW(
+                            hwnd,
+                            GWL_EXSTYLE,
+                            style & !(WS_EX_TOPMOST.0 as isize),
+                        );
+                    }
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(if on { HWND_BOTTOM } else { HWND_NOTOPMOST }),
                         0,
                         0,
                         0,
@@ -781,11 +1050,13 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                     s.app.scroll = 0.0;
                     s.worker.send(Command::SetRowLimit(limit));
                 });
-                let scale = dpi_scale(hwnd);
-                let height = ui::layout::height_for_rows(rows, scale)
-                    .min(work_area().3 - work_area().1);
+                let scale = window_scale(hwnd);
+                let work = work_area_for(hwnd);
+                let height = ui::layout::height_for_rows(rows, scale).min(work.3 - work.1);
                 let mut rc = RECT::default();
-                unsafe { let _ = GetWindowRect(hwnd, &mut rc); }
+                unsafe {
+                    let _ = GetWindowRect(hwnd, &mut rc);
+                }
                 let _ = unsafe {
                     SetWindowPos(
                         hwnd,
@@ -799,6 +1070,18 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 };
                 save_window_state(hwnd);
                 invalidate(hwnd);
+            }
+            Action::SetFontSize(size) => {
+                // Clamp here too, so a value that slipped past the menu (e.g. a
+                // stale config from a future range) cannot blow the layout up.
+                let size = size.clamp(10.0, 24.0);
+                State::with(|s| s.app.config.font_size = size);
+                // Re-derive the draw scale from the new font size, reload the
+                // fonts and refit the window — `sync_scale` is the same path a
+                // monitor change takes, so the panel stays consistent. It
+                // reloads fonts, resizes, clamps scroll and invalidates.
+                sync_scale(hwnd);
+                save_window_state(hwnd);
             }
             Action::Paste => {
                 if let Some(text) = clipboard_text() {
@@ -860,12 +1143,19 @@ fn save_window_state(hwnd: HWND) {
     unsafe {
         let _ = GetWindowRect(hwnd, &mut rc);
     }
+    // Persist the size in logical (96-DPI) units. Storing device pixels would
+    // make the remembered size depend on which monitor the panel happened to be
+    // on when it was last closed, so reopening on a different screen would come
+    // back the wrong size. Position stays in device pixels — it is a screen
+    // coordinate, not a length.
+    let scale = window_scale(hwnd);
     State::with(|s| {
+        s.app.config.logical_window = true;
         s.app.config.window = WindowState {
             x: rc.left,
             y: rc.top,
-            width: (rc.right - rc.left).max(320),
-            height: (rc.bottom - rc.top).max(240),
+            width: ui::layout::logical_px((rc.right - rc.left).max(320), scale),
+            height: ui::layout::logical_px((rc.bottom - rc.top).max(240), scale),
         };
         s.app.save();
     });
@@ -880,7 +1170,7 @@ fn paint(hwnd: HWND) {
         let m = Metrics::new(
             (rc.right - rc.left) as f32,
             (rc.bottom - rc.top) as f32,
-            dpi_scale(hwnd),
+            window_scale(hwnd),
         );
 
         // Draw the whole frame into an off-screen bitmap and present it with one
@@ -910,8 +1200,6 @@ fn paint(hwnd: HWND) {
                         selected: s.app.selected,
                         status_text: s.app.status.clone(),
                         user: s.app.user_name.as_deref(),
-                        last_refresh: s.app.last_refresh.as_deref(),
-                        paused: s.app.paused,
                         pinned: s.app.config.pin_position,
                     };
                     panel::draw(&painter, &s.fonts, m, &view);
@@ -1088,9 +1376,13 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
         }
 
         // Selection is recorded here so the row highlights on press; the
-        // browser is only opened on release (see `on_left_up`).
-        if let Some(index) = panel::hit_row(m, &list_view(s), x, y) {
-            s.app.selected = Some(index);
+        // browser is only opened on release (see `on_left_up`). Pinned mode is
+        // display-only: a click must not select a card, only the right-click
+        // menu opens the detail page.
+        if !s.app.config.pin_position {
+            if let Some(index) = panel::hit_row(m, &list_view(s), x, y) {
+                s.app.selected = Some(index);
+            }
         }
     });
 
@@ -1106,9 +1398,9 @@ fn on_left_up(hwnd: HWND, lp: LPARAM) {
     let m = metrics_for(hwnd);
 
     // Only open the request if the pointer is still over the row it went down
-    // on, so dragging off a card cancels the action.
+    // on, so dragging off a card cancels the action. Pinned mode is display-only.
     let url = State::with(|s| {
-        if s.app.is_login() {
+        if s.app.is_login() || s.app.config.pin_position {
             return None;
         }
         let index = panel::hit_row(m, &list_view(s), x, y)?;
@@ -1134,8 +1426,6 @@ fn list_view(s: &State) -> ListView<'_> {
         selected: s.app.selected,
         status_text: None,
         user: None,
-        last_refresh: None,
-        paused: s.app.paused,
         pinned: s.app.config.pin_position,
     }
 }
@@ -1311,8 +1601,21 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
             s.worker.send(Command::Pause(s.app.paused));
         }
         MENU_TOPMOST => {
-            s.app.config.always_on_top = !s.app.config.always_on_top;
-            actions.push(Action::SetTopmost(s.app.config.always_on_top));
+            let on = !s.app.config.always_on_top;
+            s.app.config.always_on_top = on;
+            if on {
+                s.app.config.always_on_bottom = false;
+                actions.push(Action::SetBottom(false));
+            }
+            actions.push(Action::SetTopmost(on));
+        }
+        MENU_BOTTOMMOST => {
+            let on = !s.app.config.always_on_bottom;
+            s.app.config.always_on_bottom = on;
+            if on {
+                s.app.config.always_on_top = false;
+            }
+            actions.push(Action::SetBottom(on));
         }
         MENU_PIN_POSITION => {
             s.app.config.pin_position = !s.app.config.pin_position;
@@ -1324,16 +1627,20 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
             );
             actions.push(Action::OpenUrl(url));
         }
+        MENU_CLEAR_CREDS => actions.push(Action::ClearCredentials),
         MENU_SIGNIN => actions.push(Action::OpenLogin(None)),
         MENU_QUIT => actions.push(Action::Quit),
         MENU_ROWS_5 => actions.push(Action::ResizeToRows(5)),
         MENU_ROWS_10 => actions.push(Action::ResizeToRows(10)),
         MENU_ROWS_15 => actions.push(Action::ResizeToRows(15)),
         MENU_ROWS_20 => actions.push(Action::ResizeToRows(20)),
+        _ if (MENU_FONT_BASE..=MENU_FONT_MAX).contains(&id) => {
+            actions.push(Action::SetFontSize((10 + (id - MENU_FONT_BASE)) as f32));
+        }
         _ => return,
     });
     // Settings changed by a menu command are persisted after the borrow ends.
-    if id == MENU_TOPMOST || id == MENU_PIN_POSITION {
+    if id == MENU_TOPMOST || id == MENU_PIN_POSITION || id == MENU_BOTTOMMOST {
         actions.push(Action::Save);
     }
     actions.push(Action::Redraw);
@@ -1345,9 +1652,8 @@ fn show_menu(hwnd: HWND) {
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
 
-        let label = |text: &str| -> Vec<u16> {
-            text.encode_utf16().chain(std::iter::once(0)).collect()
-        };
+        let label =
+            |text: &str| -> Vec<u16> { text.encode_utf16().chain(std::iter::once(0)).collect() };
 
         let add = |text: &str, id: usize, checked: bool, enabled: bool| {
             let mut wide = label(text);
@@ -1361,8 +1667,9 @@ fn show_menu(hwnd: HWND) {
             let _ = AppendMenuW(menu, flags, id, PCWSTR(wide.as_mut_ptr()));
         };
 
-        let (paused, topmost, pinned) =
-            State::with(|s| (s.app.paused, s.app.config.always_on_top, s.app.config.pin_position)).unwrap_or((false, true, false));
+        let (pinned, bottom) =
+            State::with(|s| (s.app.config.pin_position, s.app.config.always_on_bottom))
+                .unwrap_or((false, false));
         // Row count submenu.
         let current_rows = State::with(|s| s.app.config.row_limit as usize).unwrap_or(12);
         if let Ok(rows_menu) = CreatePopupMenu() {
@@ -1373,15 +1680,55 @@ fn show_menu(hwnd: HWND) {
                 ("20 条", MENU_ROWS_20, 20),
             ];
             for &(text, mid, count) in items {
-                let mut wide = text.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+                let mut wide = text
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<u16>>();
                 let mut flags = MF_STRING;
                 if current_rows == count {
                     flags |= MF_CHECKED;
                 }
                 let _ = AppendMenuW(rows_menu, flags, mid, PCWSTR(wide.as_mut_ptr()));
             }
-            let mut sub_label = "显示数量".encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
-            let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, rows_menu.0 as usize, PCWSTR(sub_label.as_mut_ptr()));
+            let mut sub_label = "显示数量"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>();
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | MF_POPUP,
+                rows_menu.0 as usize,
+                PCWSTR(sub_label.as_mut_ptr()),
+            );
+        }
+        // Font-size submenu: body font in px at the 96-DPI baseline, 10–24.
+        let current_font = State::with(|s| s.app.config.font_size).unwrap_or(12.5);
+        if let Ok(font_menu) = CreatePopupMenu() {
+            for size in 10..=24 {
+                let text = size.to_string();
+                let mut wide = text
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<u16>>();
+                let mid = MENU_FONT_BASE + (size - 10) as usize;
+                let mut flags = MF_STRING;
+                // Only an exact integer match is checked, so the authored
+                // 12.5 default shows no tick until the user picks a size.
+                if (current_font - size as f32).abs() < 0.01 {
+                    flags |= MF_CHECKED;
+                }
+                let _ = AppendMenuW(font_menu, flags, mid, PCWSTR(wide.as_mut_ptr()));
+            }
+            let mut sub_label = "字号"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>();
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | MF_POPUP,
+                font_menu.0 as usize,
+                PCWSTR(sub_label.as_mut_ptr()),
+            );
         }
         add("刷新", MENU_REFRESH, false, true);
         add("打开请求页", MENU_OPEN, false, true);
@@ -1389,6 +1736,7 @@ fn show_menu(hwnd: HWND) {
         add("清除保存的凭据", MENU_CLEAR_CREDS, false, true);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add("固定窗口位置", MENU_PIN_POSITION, pinned, true);
+        add("置底", MENU_BOTTOMMOST, bottom, true);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add("退出", MENU_QUIT, false, true);
 
@@ -1405,7 +1753,12 @@ fn show_menu(hwnd: HWND) {
 
         if command.0 != 0 {
             let _ = SetForegroundWindow(hwnd);
-            let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(command.0 as usize), LPARAM(0));
+            let _ = PostMessageW(
+                Some(hwnd),
+                WM_COMMAND,
+                WPARAM(command.0 as usize),
+                LPARAM(0),
+            );
         }
     }
 }
@@ -1425,4 +1778,3 @@ fn open_url_async(url: &str) {
         );
     }
 }
-

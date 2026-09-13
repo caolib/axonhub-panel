@@ -1,23 +1,5 @@
 //! Value formatting that mirrors the AxonHub requests page.
 
-/// Duration rule lifted from the frontend `formatDuration`.
-pub fn duration(ms: Option<i64>) -> String {
-    let Some(ms) = ms else { return DASH.into() };
-    if ms <= 0 {
-        return DASH.into();
-    }
-    let f = ms as f64;
-    if f < 1.0 {
-        format!("{f:.3}ms")
-    } else if f < 1000.0 {
-        format!("{f:.0}ms")
-    } else if f < 60_000.0 {
-        format!("{:.1}s", f / 1000.0)
-    } else {
-        format!("{:.1}m", f / 60_000.0)
-    }
-}
-
 /// Compact token count for the primary line of a card.
 pub fn tokens_compact(n: i64) -> String {
     if n <= 0 {
@@ -30,15 +12,6 @@ pub fn tokens_compact(n: i64) -> String {
         format!("{:.1}k", f / 1000.0)
     } else {
         n.to_string()
-    }
-}
-
-
-/// Cost with the fixed six decimals the requests page requests from `Intl`.
-pub fn cost(v: Option<f64>) -> String {
-    match v {
-        Some(v) => format!("${v:.6}"),
-        None => DASH.into(),
     }
 }
 
@@ -98,17 +71,10 @@ fn parse_local_hms(iso: &str) -> Option<String> {
         second,
     };
     let local = super::time::to_local(utc).unwrap_or(utc);
-    Some(format!("{:02}:{:02}:{:02}", local.hour, local.minute, local.second))
-}
-
-/// Short protocol label used by the requests page (`API_FORMAT_LABELS`).
-pub fn format_label(raw: &str) -> &str {
-    match raw {
-        "openai/chat_completions" => "chat",
-        "openai/responses" => "responses",
-        "anthropic/messages" => "messages",
-        other => other,
-    }
+    Some(format!(
+        "{:02}:{:02}:{:02}",
+        local.hour, local.minute, local.second
+    ))
 }
 
 #[cfg(test)]
@@ -150,23 +116,5 @@ mod tests {
     fn missing_timestamp_is_a_dash() {
         assert_eq!(relative_time(None, BASE), DASH);
         assert_eq!(relative_time(Some("garbage"), BASE), DASH);
-    }
-
-    #[test]
-    fn duration_matches_the_requests_page_rules() {
-        assert_eq!(duration(Some(0)), DASH);
-        assert_eq!(duration(None), DASH);
-        assert_eq!(duration(Some(500)), "500ms");
-        assert_eq!(duration(Some(3361)), "3.4s");
-        // The minute boundary is where the unit changes.
-        assert_eq!(duration(Some(59_999)), "60.0s");
-        assert_eq!(duration(Some(60_000)), "1.0m");
-        assert_eq!(duration(Some(162_289)), "2.7m");
-    }
-
-    #[test]
-    fn cost_uses_six_decimals() {
-        assert_eq!(cost(Some(0.00548008)), "$0.005480");
-        assert_eq!(cost(None), DASH);
     }
 }

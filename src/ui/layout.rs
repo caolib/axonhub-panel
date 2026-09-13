@@ -153,6 +153,50 @@ pub fn height_for_rows(rows: usize, scale: f32) -> i32 {
     (m.header_h + rows as f32 * m.pitch() - m.card_gap).ceil() as i32
 }
 
+/// Device pixels for a length authored at 96 DPI. The saved window size is kept
+/// in logical units so the panel is the same apparent size on every monitor,
+/// and only converted to device pixels for the monitor it currently sits on.
+pub fn device_px(logical: i32, scale: f32) -> i32 {
+    (logical as f32 * scale).round() as i32
+}
+
+/// The inverse of `device_px`, for persisting a window size that was measured in
+/// device pixels. Never returns zero, so a degenerate window still round-trips.
+pub fn logical_px(device: i32, scale: f32) -> i32 {
+    (device as f32 / scale.max(0.01)).round().max(1.0) as i32
+}
+
+/// Scale that keeps a length the same *physical* size on the monitor described
+/// by its device-pixel resolution (`px_w`/`px_h`) and EDID-reported glass size
+/// in millimetres (`mm_w`/`mm_h`), relative to the 96-DPI baseline the layout
+/// is authored against.
+///
+/// Windows' per-monitor DPI setting is the system's *guess* at density; it does
+/// not match when two monitors share a scaling value but differ in pixels-per
+/// inch, so the panel ends up too small on the denser screen. The physical
+/// density is exact, so the scale is derived from it directly. Returns `None`
+/// when the reported dimensions are missing or absurd (a driver without EDID
+/// returns zeroes), so the caller can fall back to the Windows DPI guess.
+pub fn physical_scale(px_w: i32, px_h: i32, mm_w: f32, mm_h: f32) -> Option<f32> {
+    if px_w <= 0 || px_h <= 0 || mm_w <= 0.0 || mm_h <= 0.0 {
+        return None;
+    }
+    let diag_px = ((px_w as f32).powi(2) + (px_h as f32).powi(2)).sqrt();
+    let diag_in = ((mm_w * mm_w + mm_h * mm_h).sqrt()) / 25.4;
+    // 5–80 inches covers every real panel and rules out a driver returning
+    // the desktop extents, or a single stray value, by mistake.
+    if !(5.0..=80.0).contains(&diag_in) {
+        return None;
+    }
+    let ppi = diag_px / diag_in;
+    // 60–500 PPI covers every desktop and laptop panel; outside it the EDID
+    // is not to be trusted.
+    if !(60.0..=500.0).contains(&ppi) {
+        return None;
+    }
+    Some((ppi / 96.0).clamp(0.75, 4.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +254,27 @@ mod tests {
         let scroll = m.max_scroll(50);
         let last_visible = m.row_at(m.rows_bottom() - 2.0, scroll, 50);
         assert!(last_visible.is_some());
+    }
+
+    #[test]
+    fn physical_scale_tracks_real_density() {
+        // 24" 1080p — about 92 PPI, just under the 96-DPI authoring baseline.
+        let s = physical_scale(1920, 1080, 527.0, 296.0).unwrap();
+        assert!((s - 0.96).abs() < 0.02, "{s}");
+        // 27" 4K — about 163 PPI, so the panel grows to keep its physical size.
+        let big = physical_scale(3840, 2160, 597.0, 336.0).unwrap();
+        assert!(big > 1.5 && big < 1.75, "{big}");
+    }
+
+    #[test]
+    fn physical_scale_rejects_missing_or_absurd_edid() {
+        // No physical dimensions reported.
+        assert_eq!(physical_scale(1920, 1080, 0.0, 0.0), None);
+        // A driver that synthesises 96-DPI dimensions from the pixel count
+        // reports 96 PPI — the canonical value that yields scale 1.0.
+        let honest = physical_scale(1920, 1080, 508.0, 285.75).unwrap();
+        assert!((honest - 1.0).abs() < 1e-3, "{honest}");
+        // Absurd density — a driver returning the virtual desktop as 1 mm.
+        assert_eq!(physical_scale(1920, 1080, 1.0, 1.0), None);
     }
 }

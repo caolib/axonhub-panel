@@ -43,9 +43,7 @@ pub fn parse_unix(iso: &str) -> Option<i64> {
     if bytes.len() < 19 {
         return None;
     }
-    let num = |from: usize, to: usize| -> Option<i64> {
-        iso.get(from..to)?.parse::<i64>().ok()
-    };
+    let num = |from: usize, to: usize| -> Option<i64> { iso.get(from..to)?.parse::<i64>().ok() };
 
     let year = num(0, 4)?;
     let month = num(5, 7)?;
@@ -63,7 +61,11 @@ pub fn parse_unix(iso: &str) -> Option<i64> {
     // Trailing offset: `Z`, `+HH:MM` or `-HH:MM`.
     let rest = &iso[19..];
     if let Some(offset) = rest.find(['+', '-']) {
-        let sign = if rest.as_bytes()[offset] == b'-' { -1 } else { 1 };
+        let sign = if rest.as_bytes()[offset] == b'-' {
+            -1
+        } else {
+            1
+        };
         let tail = &rest[offset + 1..];
         if tail.len() >= 5 {
             if let (Ok(h), Ok(m)) = (tail[0..2].parse::<i64>(), tail[3..5].parse::<i64>()) {
@@ -92,7 +94,10 @@ mod tests {
     #[test]
     fn parses_an_axonhub_timestamp() {
         // 2026-09-12T02:20:57.7544744Z
-        assert_eq!(parse_unix("2026-09-12T02:20:57.7544744Z"), Some(1_789_179_657));
+        assert_eq!(
+            parse_unix("2026-09-12T02:20:57.7544744Z"),
+            Some(1_789_179_657)
+        );
     }
 
     #[test]
