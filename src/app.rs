@@ -5,9 +5,9 @@
 
 use crate::client::ApiError;
 use crate::config::{Config, Credentials, Stored};
-use crate::model::{self, Row};
+use crate::model::{self, Row, Source};
 use crate::ui::login::{LoginForm, Method};
-use crate::worker::{Command, Update, Worker};
+use crate::worker::{Command, OctopusHealth, Update, Worker};
 
 /// Which surface the panel is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,7 +19,15 @@ pub enum View {
 pub struct App {
     pub view: View,
     pub config: Config,
+    /// The merged, truncated list the UI renders. AxonHub and Octopus rows are
+    /// kept apart and re-merged on every update, so each source keeps updating
+    /// when the other is down.
     pub rows: Vec<Row>,
+    axon_rows: Vec<Row>,
+    axon_total: i64,
+    octo_rows: Vec<Row>,
+    /// Octopus connection state, shown in the context menu.
+    pub octopus_health: OctopusHealth,
     pub total: i64,
     /// Unclamped scroll offset in pixels; the UI clamps against the metrics.
     pub scroll: f32,
@@ -47,6 +55,10 @@ impl App {
         App {
             view,
             rows: Vec::new(),
+            axon_rows: Vec::new(),
+            axon_total: 0,
+            octo_rows: Vec::new(),
+            octopus_health: OctopusHealth::Disabled,
             total: 0,
             scroll: 0.0,
             hover: None,
@@ -112,14 +124,19 @@ impl App {
                     worker.send(Command::SetToken(token));
                 }
                 Update::Snapshot { rows, total } => {
-                    self.rows = rows;
-                    self.total = total;
-                    if let Some(sel) = self.selected {
-                        if sel >= self.rows.len() {
-                            self.selected = None;
-                        }
-                    }
+                    self.axon_rows = rows;
+                    self.axon_total = total;
+                    self.rebuild();
                     self.status = None;
+                }
+                Update::OctopusRows(rows) => {
+                    self.octo_rows = rows;
+                    self.rebuild();
+                    // Deliberately leaves `status` alone: Octopus health must
+                    // not mask a red AxonHub status line.
+                }
+                Update::OctopusHealth(health) => {
+                    self.octopus_health = health;
                 }
                 Update::Failed(err) => {
                     // A token the server rejects is worse than useless: drop any
@@ -158,11 +175,42 @@ impl App {
         }
     }
 
-    /// Record a click on the request list, returning the URL to open.
+    /// Re-merge both sources into the display list, newest first, capped at the
+    /// configured row count. Both sources stay live independently: a successful
+    /// update from one never discards the other's rows.
+    fn rebuild(&mut self) {
+        let mut rows = Vec::with_capacity(self.axon_rows.len() + self.octo_rows.len());
+        rows.extend(self.axon_rows.iter().cloned());
+        rows.extend(self.octo_rows.iter().cloned());
+        rows.sort_by_key(|row| std::cmp::Reverse(row.age_key()));
+        rows.truncate(self.config.row_limit.max(1) as usize);
+        self.rows = rows;
+        self.total = self.axon_total + self.octo_rows.len() as i64;
+        if self.selected.is_some_and(|sel| sel >= self.rows.len()) {
+            self.selected = None;
+        }
+    }
+
+    /// One-line Octopus state for the context menu. `None` when the second
+    /// source is disabled, which also hides its menu group.
+    pub fn octopus_summary(&self) -> Option<String> {
+        match &self.octopus_health {
+            OctopusHealth::Disabled => None,
+            OctopusHealth::MissingToken => Some("Octopus: 未设置令牌".into()),
+            OctopusHealth::Connected => Some("Octopus: 已连接".into()),
+            OctopusHealth::Error(message) => Some(format!("Octopus: {message}")),
+        }
+    }
+
+    /// Record a click on the request list, returning the URL to open. Octopus
+    /// has no per-request routes, so its rows open the dashboard instead.
     pub fn click_row(&mut self, index: usize) -> Option<String> {
         self.selected = Some(index);
         let row = self.rows.get(index)?;
-        Some(model::request_url(&self.config.endpoint, &row.id))
+        Some(match row.source {
+            Source::AxonHub => model::request_url(&self.config.endpoint, &row.id),
+            Source::Octopus => model::octopus_url(&self.config.octopus_endpoint),
+        })
     }
 
     /// Persist anything that changed while running.

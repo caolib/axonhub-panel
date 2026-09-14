@@ -1,10 +1,12 @@
 # AH Panel
 
-AxonHub 请求监控面板 — 常驻桌面右上角的悬浮小窗,自动轮询并实时显示最近的请求,
+AxonHub / Octopus 请求监控面板 — 常驻桌面右上角的悬浮小窗,自动轮询并实时显示最近的请求,
 无需打开浏览器。
 
 ## 特性
 
+- **双网关**:可同时显示 AxonHub 与 [Octopus](https://github.com/bestruirui/octopus) 两个网关的
+  请求,按时间混排;列表混有两个来源时,卡片行首标 `AH` / `OCT` 来源徽章。
 - **低占用**:GDI+ 自绘,常驻约 15 MB,空闲 CPU 0%。对比:WebView2 方案约 180 MB、egui/wgpu 约 276 MB。
 - **实时**:有请求进行中时 2 秒轮询,空闲时 5 秒;服务异常时指数退避(2s → 30s),不会打爆网关。
 - **不抢焦点**:列表视图以 `WS_EX_NOACTIVATE` 显示,瞄一眼不会夺走你的输入焦点;
@@ -73,7 +75,7 @@ cargo run --release
 > 该路由要求完整 GUID 且必须编码:`:` 和 `/` 不编码会落到 404,并提示
 > `guid must start with gid://axonhub/`。
 | 滚轮 | 上下滚动 |
-| 右键 | 刷新 / 打开请求页 / 显示数量 / 字号 / 清除凭据 / 固定窗口位置 / 置底 / 退出 |
+| 右键 | 刷新 / 打开请求页 / Octopus 令牌与面板 / 显示数量 / 字号 / 清除凭据 / 固定窗口位置 / 置底 / 退出 |
 
 > 卡片区域不参与拖动,点卡片是「打开该请求」;窗口边缘 6px 内是缩放区。
 
@@ -130,6 +132,8 @@ cargo run --release
   "rowLimit": 12,            // 由窗口高度自动推导
   "credentialMode": "token", // token | password | none
   "tokenEnvVar": "AXONHUB_ACCESS_TOKEN",
+  "octopusEndpoint": "http://localhost:8091", // 留空关闭第二个数据源
+  "octopusTokenEnvVar": "OCTOPUS_AUTH_TOKEN",
   "alwaysOnTop": true,
   "pinPosition": false,      // 固定位置:开启后不可拖动、不可改大小
   "alwaysOnBottom": false,
@@ -160,6 +164,40 @@ AxonHub 的 `/admin/graphql`(请求列表的数据源)**只接受 JWT**。
 JWT 有效期 7 天(`biz/auth.go`),且没有 refresh token。面板会在启动时解析 `exp`
 并提前提示是否过期,避免白白发一次必然 401 的请求。
 
+## Octopus 数据源
+
+面板可同时显示 AxonHub 与 [Octopus](https://github.com/bestruirui/octopus) 两个网关的请求,
+按时间混排;列表同时含两个来源时,卡片行首显示 `AH` / `OCT` 来源徽章。
+
+数据来源是 Octopus 的实时日志流 `GET /api/v1/log/overview/stream`(SSE):连接后立即下发
+内存中最近约 50 条已结束请求与全部进行中请求,之后按请求增量推送。面板每次轮询读取约
+1 秒后断开,下次连接用新快照覆盖,状态不会丢。该接口**只认登录换来的 `auth` Cookie**,
+不接受 `sk-octopus-` 开头的 API key。
+
+### 获取并粘贴令牌
+
+1. 浏览器登录 Octopus(建议勾选「信任设备」,令牌有效期 30 天),打开开发者工具 →
+   Application → Cookies → 复制 `auth` 的值;
+2. 面板右键 → 「粘贴 Octopus 令牌」。剪贴板内容(`auth=…`、完整 Cookie 行或裸值均可)
+   校验 JWT 有效期后加密保存(DPAPI);启动时也会读环境变量 `OCTOPUS_AUTH_TOKEN`(不落盘),
+   变量名可在配置里改(`octopusTokenEnvVar`)。
+3. 右键菜单会显示连接状态(未设置令牌 / 已连接 / 令牌无效或已过期),并可打开 Octopus
+   面板首页或清除令牌。
+
+### 字段差异
+
+| 字段 | Octopus | 面板表现 |
+|---|---|---|
+| 首字耗时 | 无 | TPS 以总耗时近似,略偏低 |
+| 推理强度 / 透传 / 流式 | 无 | 不显示对应标记 |
+| 协议 | 数值位值(chat / responses / messages) | 与 AxonHub 同样参与「转」判断 |
+| 重试轮次 | `round` | 行尾 `n×` 重试徽章 |
+| 缓存命中 | `prompt_tokens_details.cached_tokens` | 命中率超过 100% 时按 100% 显示 |
+
+> Octopus 的日志保存在内存,没有历史查询接口;重启 Octopus 后面板列表从空开始。
+> 单请求没有可打开的详情页(网页端日志页是状态驱动的单页应用,不经过 URL),
+> 点击 Octopus 卡片会打开其面板首页。
+
 ## 数据来源
 
 复用 AxonHub 前端 `GetRequests` 的字段选择:
@@ -183,6 +221,7 @@ query GetRequests($first, $where, $orderBy) { requests(...) { ... } }
 | `app.rs` | 面板状态 |
 | `worker.rs` | 后台轮询线程 |
 | `client.rs` | GraphQL / 登录 HTTP |
+| `octopus.rs` | Octopus SSE 日志流(读快照、按 id 合并) |
 | `model.rs` | 数据结构与行转换 |
 | `config.rs` | 配置读写、凭据模式与 DPAPI 存储 |
 | `token.rs` | JWT 有效期解析 |

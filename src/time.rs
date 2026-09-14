@@ -87,6 +87,56 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// Civil date from days since the Unix epoch (Howard Hinnant's algorithm).
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    (if month <= 2 { y + 1 } else { y }, month, day)
+}
+
+/// UTC wall-clock parts for a Unix instant.
+pub fn utc_parts(unix: i64) -> SystemTimeParts {
+    let days = unix.div_euclid(86_400);
+    let secs = unix.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    SystemTimeParts {
+        year: year as u16,
+        month: month as u16,
+        day: day as u16,
+        hour: (secs / 3600) as u16,
+        minute: ((secs % 3600) / 60) as u16,
+        second: (secs % 60) as u16,
+    }
+}
+
+/// Local wall-clock parts for a Unix instant, via the Win32 timezone API.
+pub fn local_parts(unix: i64) -> Option<SystemTimeParts> {
+    to_local(utc_parts(unix))
+}
+
+pub fn to_local(utc: SystemTimeParts) -> Option<SystemTimeParts> {
+    unsafe {
+        let input: SYSTEMTIME = utc.into();
+        let mut out = SYSTEMTIME::default();
+        SystemTimeToTzSpecificLocalTime(None, &input, &mut out).ok()?;
+        Some(SystemTimeParts {
+            year: out.wYear,
+            month: out.wMonth,
+            day: out.wDay,
+            hour: out.wHour,
+            minute: out.wMinute,
+            second: out.wSecond,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,19 +164,35 @@ mod tests {
         assert_eq!(parse_unix("not-a-date"), None);
         assert_eq!(parse_unix("2026-13-12T02:20:57Z"), None);
     }
-}
-pub fn to_local(utc: SystemTimeParts) -> Option<SystemTimeParts> {
-    unsafe {
-        let input: SYSTEMTIME = utc.into();
-        let mut out = SYSTEMTIME::default();
-        SystemTimeToTzSpecificLocalTime(None, &input, &mut out).ok()?;
-        Some(SystemTimeParts {
-            year: out.wYear,
-            month: out.wMonth,
-            day: out.wDay,
-            hour: out.wHour,
-            minute: out.wMinute,
-            second: out.wSecond,
-        })
+
+    #[test]
+    fn utc_parts_inverts_days_from_civil() {
+        let parts = utc_parts(0);
+        assert_eq!(
+            (parts.year, parts.month, parts.day, parts.hour),
+            (1970, 1, 1, 0)
+        );
+        let parts = utc_parts(1_789_179_657);
+        assert_eq!((parts.year, parts.month, parts.day), (2026, 9, 12));
+        assert_eq!((parts.hour, parts.minute, parts.second), (2, 20, 57));
+        // Round trip a leap day.
+        let leap = parse_unix("2024-02-29T23:59:59Z").unwrap();
+        let parts = utc_parts(leap);
+        assert_eq!(
+            (parts.year, parts.month, parts.day, parts.hour),
+            (2024, 2, 29, 23)
+        );
+    }
+
+    #[test]
+    fn local_clock_is_derived_from_the_instant_not_the_wall_text() {
+        // The same instant written with an offset must format identically to
+        // its UTC spelling, which is what Octopus's +08:00 timestamps need.
+        let utc = local_parts(parse_unix("2026-09-12T02:20:57Z").unwrap());
+        let offset = local_parts(parse_unix("2026-09-12T10:20:57+08:00").unwrap());
+        assert_eq!(
+            utc.map(|p| (p.hour, p.minute, p.second)),
+            offset.map(|p| (p.hour, p.minute, p.second))
+        );
     }
 }
