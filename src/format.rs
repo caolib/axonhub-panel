@@ -17,10 +17,11 @@ pub fn tokens_compact(n: i64) -> String {
 
 pub const DASH: &str = "—";
 
-/// Relative age such as `just now` / `30s ago` / `2 min ago` / `1 hr ago`.
+/// Relative age such as `30s` / `2m` / `1h` / `3d`, falling back to an
+/// absolute clock reading beyond a week.
 ///
 /// Recent requests are what the panel is for, so the first minutes are shown in
-/// seconds and anything older than a week falls back to an absolute date.
+/// seconds and anything older than a week shows the wall clock.
 pub fn relative_time(iso: Option<&str>, now: i64) -> String {
     let Some(then) = iso.and_then(crate::time::parse_unix) else {
         return DASH.into();
@@ -33,48 +34,27 @@ pub fn relative_time(iso: Option<&str>, now: i64) -> String {
     }
     let clock = local_clock(iso);
     match delta {
-        0..=4 => "just now".into(),
-        5..=59 => format!("{delta}s"),
-        60..=3599 => format!("{} min", delta / 60),
-        3600..=86_399 => format!("{} hr", delta / 3600),
-        86_400..=172_799 => format!("yesterday {clock}"),
-        _ if delta < 7 * 86_400 => format!("{} days", delta / 86_400),
+        0..=59 => format!("{delta}s"),
+        60..=3599 => format!("{}m", delta / 60),
+        3600..=86_399 => format!("{}h", delta / 3600),
+        _ if delta < 7 * 86_400 => format!("{}d", delta / 86_400),
         _ => clock,
     }
 }
 
-/// `HH:MM:SS` in local time, derived from the wire's RFC3339 UTC instant.
+/// `HH:MM:SS` in local time, derived from the wire's RFC3339 instant.
 pub fn local_clock(iso: Option<&str>) -> String {
-    iso.and_then(crate::format::parse_local_hms)
-        .unwrap_or_else(|| DASH.into())
-}
-
-/// Parse an RFC3339 instant and convert it to wall-clock time for this machine.
-fn parse_local_hms(iso: &str) -> Option<String> {
-    let (date, rest) = iso.split_once('T')?;
-    let mut d = date.split('-');
-    let year: u16 = d.next()?.parse().ok()?;
-    let month: u16 = d.next()?.parse().ok()?;
-    let day: u16 = d.next()?.parse().ok()?;
-
-    let mut t = rest.split(':');
-    let hour: u16 = t.next()?.parse().ok()?;
-    let minute: u16 = t.next()?.parse().ok()?;
-    let second: u16 = t.next().map(|s| s.get(..2).unwrap_or(s))?.parse().ok()?;
-
-    let utc = super::time::SystemTimeParts {
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second,
-    };
-    let local = super::time::to_local(utc).unwrap_or(utc);
-    Some(format!(
-        "{:02}:{:02}:{:02}",
-        local.hour, local.minute, local.second
-    ))
+    // Convert from the parsed instant rather than the literal text: Octopus
+    // sends `+08:00` timestamps whose date/time components are already local
+    // to the gateway, and feeding those to the timezone API again would shift
+    // them twice.
+    let local = iso
+        .and_then(crate::time::parse_unix)
+        .and_then(crate::time::local_parts);
+    match local {
+        Some(p) => format!("{:02}:{:02}:{:02}", p.hour, p.minute, p.second),
+        None => DASH.into(),
+    }
 }
 
 #[cfg(test)]
@@ -89,21 +69,22 @@ mod tests {
 
     #[test]
     fn buckets_recent_ages() {
-        assert_eq!(at(0), "just now");
-        assert_eq!(at(4), "just now");
+        assert_eq!(at(0), "0s");
+        assert_eq!(at(4), "4s");
         assert_eq!(at(5), "5s");
         assert_eq!(at(59), "59s");
-        assert_eq!(at(60), "1 min");
-        assert_eq!(at(3599), "59 min");
-        assert_eq!(at(3600), "1 hr");
-        assert_eq!(at(86_399), "23 hr");
+        assert_eq!(at(60), "1m");
+        assert_eq!(at(3599), "59m");
+        assert_eq!(at(3600), "1h");
+        assert_eq!(at(86_399), "23h");
+        assert_eq!(at(86_400), "1d");
     }
 
     #[test]
     fn switches_to_a_date_beyond_a_week() {
-        // A week out, an absolute clock reading is easier to read than "7 days".
+        // A week out, an absolute clock reading is easier to read than "7d".
         assert_eq!(at(7 * 86_400), local_clock(Some("2026-09-12T02:20:57Z")));
-        assert!(at(6 * 86_400).ends_with("days"));
+        assert_eq!(at(6 * 86_400), "6d");
     }
 
     #[test]

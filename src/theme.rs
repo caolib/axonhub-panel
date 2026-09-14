@@ -21,6 +21,8 @@ pub const TEXT_DIM: u32 = 0xFF8B_94A0;
 pub const TEXT_FAINT: u32 = 0xFF5F_6773;
 pub const SEPARATOR: u32 = 0xFF20_242B;
 pub const MAUVE: u32 = 0xFFC4_A0E0;
+/// Marks an AxonHub-sourced card via its source badge.
+pub const ORANGE: u32 = 0xFFD9_7757;
 
 // --- status colours ---
 pub const GREEN: u32 = 0xFF3F_B950;

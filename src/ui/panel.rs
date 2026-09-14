@@ -9,7 +9,7 @@
 use windows::Win32::Graphics::GdiPlus::RectF;
 
 use crate::format as fmt;
-use crate::model::Row;
+use crate::model::{Row, Source};
 use crate::theme::{self, Painter};
 use crate::ui::layout::{Metrics, Rect};
 
@@ -201,6 +201,7 @@ fn draw_rows(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     p.reset_clip();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_card(
     p: &Painter,
     fonts: &theme::Fonts,
@@ -234,13 +235,16 @@ fn draw_card(
     let text_x = rect.x + c.inner_pad;
     let mut y = rect.y + c.accent_inset;
 
-    // --- Line 1: marks, caller, channel, time(right) ---
+    // --- Line 1: marks, caller, channel, source + time(right) ---
     let line1_y = y;
     let line1_gap = 6.0 * m.scale;
     let mut x = text_x;
     let mark_gap = 2.0 * m.scale;
 
-    {
+    // 流 and 透 are AxonHub-only: Octopus's overview does not report whether
+    // the client streamed or whether the body was passed through untouched, and
+    // a faint mark would wrongly read as "no".
+    if row.source == Source::AxonHub {
         let w = p.dual_measure(&fonts.body, "流");
         p.dual_text(
             &fonts.body,
@@ -280,7 +284,7 @@ fn draw_card(
     }
 
     // Pass-through mark: 透 highlighted when applied.
-    {
+    if row.source == Source::AxonHub {
         let w = p.dual_measure(&fonts.body, "透");
         p.dual_text(
             &fonts.body,
@@ -299,13 +303,33 @@ fn draw_card(
         x += w + line1_gap;
     }
 
-    // Time: right-aligned on line 1.
+    // Time: right-aligned on line 1, with the source badge directly ahead of
+    // it when the list mixes gateways.
     let time_text = fmt::relative_time(row.created_at.as_deref(), v.now);
     let time_w = p.dual_measure(&fonts.body, &time_text) + 4.0;
+    let time_x = rect.x + rect.w - c.inner_pad - time_w;
+
+    // Source tag, showing which gateway served the request.
+    let badge = row.source.badge();
+    let badge_w = p.dual_measure(&fonts.small, badge);
+    p.dual_text(
+        &fonts.small,
+        badge,
+        time_x - badge_w - 6.0 * m.scale,
+        line1_y,
+        badge_w,
+        c.line2,
+        match row.source {
+            Source::AxonHub => theme::ORANGE,
+            Source::Octopus => theme::BLUE,
+        },
+        theme::ALIGN_NEAR,
+    );
+
     p.dual_text(
         &fonts.body,
         &time_text,
-        rect.x + rect.w - c.inner_pad - time_w,
+        time_x,
         line1_y,
         time_w,
         c.line1,
@@ -313,8 +337,8 @@ fn draw_card(
         theme::ALIGN_FAR,
     );
 
-    // Remaining space between marks and time.
-    let badge_limit = rect.x + rect.w - c.inner_pad - time_w - 4.0 * m.scale;
+    // Remaining space between marks and the source badge.
+    let badge_limit = time_x - badge_w - 6.0 * m.scale - 4.0 * m.scale;
 
     // Caller (API key name).
     if let Some(caller) = &row.caller {
