@@ -391,8 +391,9 @@ fn hit_test(m: Metrics, x: f32, y: f32) -> isize {
         } else {
             // Cards are not clickable: the whole surface is a drag handle so
             // a stray click can never open a browser. The request detail page
-            // is reachable from the right-click menu instead.
-            false
+            // is reachable from the right-click menu instead. The header
+            // filter chips are the exception.
+            panel::hit_filter(m, &list_view(s), x, y).is_some()
         }
     })
     .unwrap_or(false);
@@ -1304,6 +1305,7 @@ fn paint(hwnd: HWND) {
                         status_text: s.app.status.clone(),
                         user: s.app.user_name.as_deref(),
                         pinned: s.app.config.pin_position,
+                        filter: s.app.filter,
                     };
                     panel::draw(&painter, &s.fonts, m, &view);
                 }
@@ -1478,14 +1480,18 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
             return;
         }
 
-        // Selection is recorded here so the row highlights on press; the
-        // browser is only opened on release (see `on_left_up`). Pinned mode is
-        // display-only: a click must not select a card, only the right-click
-        // menu opens the detail page.
-        if !s.app.config.pin_position {
-            if let Some(index) = panel::hit_row(m, &list_view(s), x, y) {
-                s.app.selected = Some(index);
-            }
+        // Filter chips take the press; card selection only happens on the list
+        // proper. Pinned mode is display-only: a click must not select a
+        // card or switch filters, only the right-click menu opens the detail
+        // page.
+        if let Some(f) = panel::hit_filter(m, &list_view(s), x, y) {
+            s.app.click_filter(f);
+            s.app.scroll = 0.0;
+            redraw = true;
+        } else if !s.app.config.pin_position
+            && let Some(index) = panel::hit_row(m, &list_view(s), x, y)
+        {
+            s.app.selected = Some(index);
         }
     });
 
@@ -1530,6 +1536,7 @@ fn list_view(s: &State) -> ListView<'_> {
         status_text: None,
         user: None,
         pinned: s.app.config.pin_position,
+        filter: s.app.filter,
     }
 }
 

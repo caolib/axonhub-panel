@@ -722,3 +722,57 @@ impl Status {
         matches!(self, Status::Processing | Status::Pending)
     }
 }
+
+/// Which request states the list shows. The header chips mirror this enum:
+/// one chip per filter plus 全部 for the empty mask. Chips toggle
+/// independently, so any combination of states can be selected at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Filter {
+    #[default]
+    All,
+    Completed,
+    Failed,
+    Active,
+}
+
+/// Bitmask of selected `Filter`s; the empty mask shows everything (`All`).
+pub type FilterMask = u8;
+
+pub const FILTER_NONE: FilterMask = 0;
+pub const FILTER_COMPLETED: FilterMask = 1 << 0;
+pub const FILTER_FAILED: FilterMask = 1 << 1;
+pub const FILTER_ACTIVE: FilterMask = 1 << 2;
+
+impl Filter {
+    /// Header chip labels.
+    pub fn label(self) -> &'static str {
+        match self {
+            Filter::All => "全部",
+            Filter::Completed => "成功",
+            Filter::Failed => "失败",
+            Filter::Active => "进行",
+        }
+    }
+
+    /// The single bit this chip toggles; `All` maps to the empty mask.
+    pub fn mask(self) -> FilterMask {
+        match self {
+            Filter::All => FILTER_NONE,
+            Filter::Completed => FILTER_COMPLETED,
+            Filter::Failed => FILTER_FAILED,
+            Filter::Active => FILTER_ACTIVE,
+        }
+    }
+}
+
+/// Whether a row with `status` passes the selected mask. The empty mask shows
+/// everything; otherwise only the chosen states are kept (进行 covers both
+/// Processing and Pending, mirroring `Status::is_active`).
+pub fn mask_matches(mask: FilterMask, status: Status) -> bool {
+    if mask == FILTER_NONE {
+        return true;
+    }
+    (status == Status::Completed && mask & FILTER_COMPLETED != 0)
+        || (status == Status::Failed && mask & FILTER_FAILED != 0)
+        || (status.is_active() && mask & FILTER_ACTIVE != 0)
+}

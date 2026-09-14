@@ -5,7 +5,7 @@
 
 use crate::client::ApiError;
 use crate::config::{Config, Credentials, Stored};
-use crate::model::{self, Row, Source};
+use crate::model::{self, Filter, FilterMask, Row, Source};
 use crate::ui::login::{LoginForm, Method};
 use crate::worker::{Command, OctopusHealth, Update, Worker};
 
@@ -29,6 +29,9 @@ pub struct App {
     /// Octopus connection state, shown in the context menu.
     pub octopus_health: OctopusHealth,
     pub total: i64,
+    /// Selected status-filter bits applied on top of the merged list;
+    /// `FILTER_NONE` shows every row.
+    pub filter: FilterMask,
     /// Unclamped scroll offset in pixels; the UI clamps against the metrics.
     pub scroll: f32,
     pub hover: Option<usize>,
@@ -60,6 +63,7 @@ impl App {
             octo_rows: Vec::new(),
             octopus_health: OctopusHealth::Disabled,
             total: 0,
+            filter: model::FILTER_NONE,
             scroll: 0.0,
             hover: None,
             selected: None,
@@ -176,19 +180,38 @@ impl App {
     }
 
     /// Re-merge both sources into the display list, newest first, capped at the
-    /// configured row count. Both sources stay live independently: a successful
-    /// update from one never discards the other's rows.
+    /// configured row count, then drop rows that fail the status mask. Both
+    /// sources stay live independently: a successful update from one never
+    /// discards the other's rows.
     fn rebuild(&mut self) {
         let mut rows = Vec::with_capacity(self.axon_rows.len() + self.octo_rows.len());
         rows.extend(self.axon_rows.iter().cloned());
         rows.extend(self.octo_rows.iter().cloned());
         rows.sort_by_key(|row| std::cmp::Reverse(row.age_key()));
+        if self.filter != model::FILTER_NONE {
+            rows.retain(|row| model::mask_matches(self.filter, row.status));
+        }
         rows.truncate(self.config.row_limit.max(1) as usize);
         self.rows = rows;
         self.total = self.axon_total + self.octo_rows.len() as i64;
         if self.selected.is_some_and(|sel| sel >= self.rows.len()) {
             self.selected = None;
         }
+    }
+
+    /// Apply a chip click: 全部 clears the mask, a status chip toggles its
+    /// bit, and the merged list is re-filtered.
+    pub fn click_filter(&mut self, chip: Filter) {
+        let next = if chip == Filter::All {
+            model::FILTER_NONE
+        } else {
+            self.filter ^ chip.mask()
+        };
+        if next == self.filter {
+            return;
+        }
+        self.filter = next;
+        self.rebuild();
     }
 
     /// One-line Octopus state for the context menu. `None` when the second
@@ -216,5 +239,107 @@ impl App {
     /// Persist anything that changed while running.
     pub fn save(&self) {
         self.config.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Status;
+
+    fn row(status: Status) -> Row {
+        Row {
+            id: String::new(),
+            source: Source::AxonHub,
+            created_at: None,
+            status,
+            model: String::new(),
+            routed_model: None,
+            channel: None,
+            caller: None,
+            format: None,
+            reasoning_effort: None,
+            upstream_format: None,
+            pass_through: false,
+            stream: false,
+            latency_ms: None,
+            first_token_ms: None,
+            prompt_tokens: 0,
+            total_tokens: 0,
+            cached_tokens: 0,
+            attempt_count: 1,
+        }
+    }
+
+    fn seeded() -> App {
+        let mut app = App::new(Config::default(), None, None);
+        app.axon_total = 5;
+        app.axon_rows = vec![
+            row(Status::Completed),
+            row(Status::Failed),
+            row(Status::Processing),
+            row(Status::Pending),
+            row(Status::Canceled),
+        ];
+        app.rebuild();
+        app
+    }
+
+    #[test]
+    fn filter_keeps_only_matching_rows() {
+        let mut app = seeded();
+        assert_eq!(app.rows.len(), 5);
+
+        app.click_filter(Filter::Completed);
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].status, Status::Completed);
+
+        app.click_filter(Filter::All);
+        assert_eq!(app.rows.len(), 5);
+
+        // 进行 covers both Processing and Pending, mirroring `is_active`.
+        app.click_filter(Filter::Active);
+        assert_eq!(app.rows.len(), 2);
+        assert!(app.rows.iter().all(|r| r.status.is_active()));
+
+        app.click_filter(Filter::All);
+        app.click_filter(Filter::Failed);
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].status, Status::Failed);
+
+        app.click_filter(Filter::All);
+        assert_eq!(app.rows.len(), 5);
+    }
+
+    #[test]
+    fn chips_combine_and_toggle_independently() {
+        let mut app = seeded();
+
+        // 成功 + 进行 selected at once.
+        app.click_filter(Filter::Completed);
+        app.click_filter(Filter::Active);
+        assert_eq!(app.rows.len(), 3);
+        assert!(app.rows.iter().all(|r| {
+            r.status == Status::Completed || r.status.is_active()
+        }));
+
+        // Toggling one off keeps the other.
+        app.click_filter(Filter::Active);
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].status, Status::Completed);
+
+        // Toggling the last one off returns to the full list.
+        app.click_filter(Filter::Completed);
+        assert_eq!(app.rows.len(), 5);
+        assert_eq!(app.filter, model::FILTER_NONE);
+    }
+
+    #[test]
+    fn total_always_counts_every_source_row() {
+        let mut app = seeded();
+        let total_was = app.total;
+        app.click_filter(Filter::Failed);
+        assert_eq!(app.total, total_was);
+        assert_eq!(app.rows.len(), 1);
     }
 }

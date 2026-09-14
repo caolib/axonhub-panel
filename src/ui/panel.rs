@@ -9,7 +9,7 @@
 use windows::Win32::Graphics::GdiPlus::RectF;
 
 use crate::format as fmt;
-use crate::model::{Row, Source};
+use crate::model::{self, mask_matches, Filter, FilterMask, Row, Source};
 use crate::theme::{self, Painter};
 use crate::ui::layout::{Metrics, Rect};
 
@@ -20,6 +20,13 @@ const LINE2_H: f32 = 14.0;
 const CARD_RADIUS: f32 = 5.0;
 const ACCENT_W: f32 = 4.0;
 const ACCENT_INSET: f32 = 5.0;
+/// Header filter chips. The width is fixed (widest label 进行中 plus padding),
+/// so click hit-testing needs no font measurement.
+const FILTER_W: f32 = 46.0;
+const FILTER_H: f32 = 20.0;
+const FILTER_GAP: f32 = 4.0;
+/// Chip order on the header, left to right.
+const FILTERS: [Filter; 4] = [Filter::All, Filter::Completed, Filter::Failed, Filter::Active];
 
 /// The card's internal measurements for one draw, already scaled to the monitor.
 #[derive(Clone, Copy)]
@@ -61,6 +68,8 @@ pub struct ListView<'a> {
     pub status_text: Option<(String, bool)>,
     pub user: Option<&'a str>,
     pub pinned: bool,
+    /// Selected status-filter bits; the header chips highlight against this.
+    pub filter: FilterMask,
 }
 
 pub fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
@@ -84,19 +93,25 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     let s = m.scale;
     let y = 6.0 * s;
 
-    // Right side: active count and total, split by a separator.
+    // Right side: active count and total, split by a separator. While a
+    // status filter is active the left number is the visible subset instead.
     let active = v.rows.iter().filter(|r| r.status.is_active()).count();
+    let blue_num = if v.filter == model::FILTER_NONE {
+        active
+    } else {
+        v.rows.len()
+    };
     let right = m.width - m.pad() - 2.0;
 
-    let active_str = active.to_string();
-    let gray_text = if active > 0 {
+    let blue_str = blue_num.to_string();
+    let gray_text = if blue_num > 0 {
         format!(" / {}", v.total)
     } else {
         v.total.to_string()
     };
-    let aw = p.dual_measure(&fonts.small, &active_str);
+    let aw = p.dual_measure(&fonts.small, &blue_str);
     let gw = p.dual_measure(&fonts.small, &gray_text);
-    let right_w = if active > 0 { aw + gw } else { gw };
+    let right_w = if blue_num > 0 { aw + gw } else { gw };
 
     // Lock icon when window position is pinned.
     let sub_x = if v.pinned {
@@ -112,8 +127,57 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     } else {
         m.pad() + 2.0
     };
+    // Filter chips run left-to-right from the header's left edge; the
+    // subtitle follows them. `chip_rect`/`hit_filter` mirror this geometry.
+    let chip_y = (m.header_h - FILTER_H * s) / 2.0;
+    let chip_text_h = 14.0 * s;
+    let mut x = sub_x;
+    for f in FILTERS {
+        // 全部 is lit when nothing is selected; status chips light when
+        // their own bit is set, so several can be on at once.
+        let selected = if f == Filter::All {
+            v.filter == model::FILTER_NONE
+        } else {
+            v.filter & f.mask() != 0
+        };
+        if selected {
+            p.round_rect(
+                x,
+                chip_y,
+                FILTER_W * s,
+                FILTER_H * s,
+                3.0 * s,
+                theme::CARD_HOVER,
+                true,
+            );
+        }
+        let label = f.label();
+        let tw = p.dual_measure(&fonts.small, label);
+        let color = if selected {
+            match f {
+                Filter::All => theme::WHITE,
+                Filter::Completed => theme::GREEN,
+                Filter::Failed => theme::RED,
+                Filter::Active => theme::BLUE,
+            }
+        } else {
+            theme::TEXT_DIM
+        };
+        p.dual_text(
+            &fonts.small,
+            label,
+            x + (FILTER_W * s - tw) / 2.0,
+            chip_y + (FILTER_H * s - chip_text_h) / 2.0,
+            tw,
+            chip_text_h,
+            color,
+            theme::ALIGN_NEAR,
+        );
+        x += FILTER_W * s + FILTER_GAP * s;
+    }
+
     let sub_right = right - right_w - 8.0 * s;
-    let sub_w = (sub_right - sub_x).max(0.0);
+    let sub_w = (sub_right - x).max(0.0);
 
     let mut parts: Vec<String> = Vec::new();
     if let Some(user) = v.user {
@@ -133,7 +197,7 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     p.dual_text(
         &fonts.small,
         &text,
-        sub_x,
+        x,
         y,
         sub_w,
         18.0 * s,
@@ -141,10 +205,10 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         theme::ALIGN_NEAR,
     );
 
-    if active > 0 {
+    if blue_num > 0 {
         p.dual_text(
             &fonts.small,
-            &active_str,
+            &blue_str,
             right - right_w,
             y,
             aw,
@@ -500,10 +564,122 @@ fn draw_card(
     }
 }
 
+/// The header chip for `f`, laid out exactly as `draw_header` draws them.
+/// The pinned lock icon sits ahead of the chips, so its width is folded in.
+fn chip_rect(m: Metrics, v: &ListView, f: Filter) -> Rect {
+    let s = m.scale;
+    let mut x = if v.pinned {
+        m.pad() + 2.0 + 7.0 * s + 6.0 * s
+    } else {
+        m.pad() + 2.0
+    };
+    for g in FILTERS {
+        if g == f {
+            return Rect {
+                x,
+                y: (m.header_h - FILTER_H * s) / 2.0,
+                w: FILTER_W * s,
+                h: FILTER_H * s,
+            };
+        }
+        x += FILTER_W * s + FILTER_GAP * s;
+    }
+    unreachable!("FILTERS covers every Filter variant")
+}
+
+/// Which filter chip a point in viewport space is over. Pinned mode is
+/// display-only: chips are drawn but never clickable.
+pub fn hit_filter(m: Metrics, v: &ListView, x: f32, y: f32) -> Option<Filter> {
+    if v.pinned || y < 0.0 || y > m.header_h {
+        return None;
+    }
+    for f in FILTERS {
+        let r = chip_rect(m, v, f);
+        if x >= r.x && x <= r.x + r.w {
+            return Some(f);
+        }
+    }
+    None
+}
+
 /// Hit-test a point in viewport space.
 pub fn hit_row(m: Metrics, v: &ListView, x: f32, y: f32) -> Option<usize> {
     if x < m.pad() || x > m.width - m.pad() {
         return None;
     }
     m.row_at(y, v.scroll, v.rows.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Status;
+    use crate::ui::layout::Metrics;
+
+    fn view<'a>(rows: &'a [Row], pinned: bool) -> ListView<'a> {
+        ListView {
+            rows,
+            total: rows.len() as i64,
+            now: 0,
+            scroll: 0.0,
+            hover: None,
+            selected: None,
+            status_text: None,
+            user: None,
+            pinned,
+            filter: model::FILTER_NONE,
+        }
+    }
+
+    #[test]
+    fn chips_hit_where_they_are_drawn() {
+        let m = Metrics::new(452.0, 300.0, 1.0);
+        let v = view(&[], false);
+        for (i, f) in FILTERS.iter().enumerate() {
+            let r = chip_rect(m, &v, *f);
+            assert_eq!(
+                hit_filter(m, &v, r.x + r.w / 2.0, r.y + r.h / 2.0),
+                Some(*f),
+                "chip {} ({}) should hit at its center",
+                i,
+                f.label()
+            );
+        }
+    }
+
+    #[test]
+    fn gaps_and_the_list_area_do_not_hit() {
+        let m = Metrics::new(452.0, 300.0, 1.0);
+        let v = view(&[], false);
+        let first = chip_rect(m, &v, FILTERS[0]);
+        let second = chip_rect(m, &v, FILTERS[1]);
+        let gap_mid = first.x + first.w + (second.x - first.x - first.w) / 2.0;
+        assert!(hit_filter(m, &v, gap_mid, first.y + 1.0).is_none());
+        assert!(hit_filter(m, &v, 10.0, m.header_h + 1.0).is_none());
+        assert!(hit_filter(m, &v, -1.0, 10.0).is_none());
+    }
+
+    #[test]
+    fn pinned_mode_disables_the_chips() {
+        let m = Metrics::new(452.0, 300.0, 1.0);
+        let v = view(&[], true);
+        assert!(hit_filter(m, &v, 10.0, 10.0).is_none());
+    }
+
+    #[test]
+    fn filter_matches_status() {
+        // The empty mask shows everything, including Canceled.
+        assert!(mask_matches(model::FILTER_NONE, Status::Canceled));
+        assert!(mask_matches(model::FILTER_COMPLETED, Status::Completed));
+        assert!(!mask_matches(model::FILTER_COMPLETED, Status::Failed));
+        assert!(mask_matches(model::FILTER_FAILED, Status::Failed));
+        assert!(!mask_matches(model::FILTER_FAILED, Status::Pending));
+        assert!(mask_matches(model::FILTER_ACTIVE, Status::Processing));
+        assert!(mask_matches(model::FILTER_ACTIVE, Status::Pending));
+        assert!(!mask_matches(model::FILTER_ACTIVE, Status::Completed));
+        // Combined masks accept either state.
+        assert!(mask_matches(model::FILTER_COMPLETED | model::FILTER_ACTIVE, Status::Processing));
+        assert!(mask_matches(model::FILTER_COMPLETED | model::FILTER_ACTIVE, Status::Completed));
+        assert!(!mask_matches(model::FILTER_COMPLETED | model::FILTER_ACTIVE, Status::Failed));
+    }
 }
