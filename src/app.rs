@@ -319,9 +319,11 @@ mod tests {
         app.click_filter(Filter::Completed);
         app.click_filter(Filter::Active);
         assert_eq!(app.rows.len(), 3);
-        assert!(app.rows.iter().all(|r| {
-            r.status == Status::Completed || r.status.is_active()
-        }));
+        assert!(
+            app.rows
+                .iter()
+                .all(|r| { r.status == Status::Completed || r.status.is_active() })
+        );
 
         // Toggling one off keeps the other.
         app.click_filter(Filter::Active);

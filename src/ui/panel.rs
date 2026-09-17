@@ -9,7 +9,7 @@
 use windows::Win32::Graphics::GdiPlus::RectF;
 
 use crate::format as fmt;
-use crate::model::{self, mask_matches, Filter, FilterMask, Row, Source};
+use crate::model::{self, Filter, FilterMask, Row, Source};
 use crate::theme::{self, Painter};
 use crate::ui::layout::{Metrics, Rect};
 
@@ -26,7 +26,12 @@ const FILTER_W: f32 = 46.0;
 const FILTER_H: f32 = 20.0;
 const FILTER_GAP: f32 = 4.0;
 /// Chip order on the header, left to right.
-const FILTERS: [Filter; 4] = [Filter::All, Filter::Completed, Filter::Failed, Filter::Active];
+const FILTERS: [Filter; 4] = [
+    Filter::All,
+    Filter::Completed,
+    Filter::Failed,
+    Filter::Active,
+];
 
 /// The card's internal measurements for one draw, already scaled to the monitor.
 #[derive(Clone, Copy)]
@@ -305,9 +310,8 @@ fn draw_card(
     let mut x = text_x;
     let mark_gap = 2.0 * m.scale;
 
-    // 流 and 透 are AxonHub-only: Octopus's overview does not report whether
-    // the client streamed or whether the body was passed through untouched, and
-    // a faint mark would wrongly read as "no".
+    // 流 (streaming) is AxonHub-only: Octopus's overview does not report
+    // whether the client streamed, and a faint mark would wrongly read as "no".
     if row.source == Source::AxonHub {
         let w = p.dual_measure(&fonts.body, "流");
         p.dual_text(
@@ -327,7 +331,7 @@ fn draw_card(
         x += w + mark_gap;
     }
 
-    // Protocol conversion mark: 转 highlighted when no conversion.
+    // Protocol conversion mark: 转 yellow when conversion happened, green otherwise.
     {
         let w = p.dual_measure(&fonts.body, "转");
         p.dual_text(
@@ -338,17 +342,17 @@ fn draw_card(
             w,
             c.line1,
             if row.protocol().is_converted() {
-                theme::TEXT_FAINT
+                theme::YELLOW
             } else {
-                theme::WHITE
+                theme::GREEN
             },
             theme::ALIGN_NEAR,
         );
         x += w + mark_gap;
     }
 
-    // Pass-through mark: 透 highlighted when applied.
-    if row.source == Source::AxonHub {
+    // Pass-through mark: 透 green when applied, gray otherwise.
+    {
         let w = p.dual_measure(&fonts.body, "透");
         p.dual_text(
             &fonts.body,
@@ -358,9 +362,9 @@ fn draw_card(
             w,
             c.line1,
             if row.pass_through {
-                theme::WHITE
+                theme::GREEN
             } else {
-                theme::TEXT_FAINT
+                theme::GRAY
             },
             theme::ALIGN_NEAR,
         );
@@ -404,6 +408,25 @@ fn draw_card(
     // Remaining space between marks and the source badge.
     let badge_limit = time_x - badge_w - 6.0 * m.scale - 4.0 * m.scale;
 
+    // Protocol name (chat/responses/messages): the interface type the client
+    // spoke, placed right after the marks so it sits beside its indicators.
+    if let Some(name) = &row.format {
+        let w = p.dual_measure(&fonts.small, name);
+        if x + w < badge_limit {
+            p.dual_text(
+                &fonts.small,
+                name,
+                x,
+                line1_y,
+                w + 2.0 * m.scale,
+                c.line1,
+                theme::TEXT_DIM,
+                theme::ALIGN_NEAR,
+            );
+            x += w + 5.0 * m.scale;
+        }
+    }
+
     // Caller (API key name).
     if let Some(caller) = &row.caller {
         let w = p.dual_measure(&fonts.small, caller);
@@ -433,7 +456,7 @@ fn draw_card(
                 line1_y,
                 w + 2.0 * m.scale,
                 c.line1,
-                theme::TEXT_DIM,
+                theme::CYAN,
                 theme::ALIGN_NEAR,
             );
             x += w + 5.0 * m.scale;
@@ -613,7 +636,7 @@ pub fn hit_row(m: Metrics, v: &ListView, x: f32, y: f32) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Status;
+    use crate::model::{Status, mask_matches};
     use crate::ui::layout::Metrics;
 
     fn view<'a>(rows: &'a [Row], pinned: bool) -> ListView<'a> {
@@ -678,8 +701,17 @@ mod tests {
         assert!(mask_matches(model::FILTER_ACTIVE, Status::Pending));
         assert!(!mask_matches(model::FILTER_ACTIVE, Status::Completed));
         // Combined masks accept either state.
-        assert!(mask_matches(model::FILTER_COMPLETED | model::FILTER_ACTIVE, Status::Processing));
-        assert!(mask_matches(model::FILTER_COMPLETED | model::FILTER_ACTIVE, Status::Completed));
-        assert!(!mask_matches(model::FILTER_COMPLETED | model::FILTER_ACTIVE, Status::Failed));
+        assert!(mask_matches(
+            model::FILTER_COMPLETED | model::FILTER_ACTIVE,
+            Status::Processing
+        ));
+        assert!(mask_matches(
+            model::FILTER_COMPLETED | model::FILTER_ACTIVE,
+            Status::Completed
+        ));
+        assert!(!mask_matches(
+            model::FILTER_COMPLETED | model::FILTER_ACTIVE,
+            Status::Failed
+        ));
     }
 }

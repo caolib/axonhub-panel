@@ -27,6 +27,7 @@ pub const ORANGE: u32 = 0xFFD9_7757;
 // --- status colours ---
 pub const GREEN: u32 = 0xFF3F_B950;
 pub const BLUE: u32 = 0xFF4C_9AFF;
+pub const CYAN: u32 = 0xFF79_C0FF;
 pub const RED: u32 = 0xFFF8_5149;
 pub const GRAY: u32 = 0xFF8B_949E;
 pub const YELLOW: u32 = 0xFFD2_9922;

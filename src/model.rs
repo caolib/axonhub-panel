@@ -193,11 +193,25 @@ pub struct OctopusPromptDetails {
 fn protocol_name(bits: Option<u32>) -> Option<String> {
     let name = match bits? {
         2 => "chat",
-        4 => "responses",
-        8 => "messages",
+        4 => "resp",
+        8 => "mess",
         _ => return None,
     };
     Some(name.to_string())
+}
+
+/// Collapse a wire format string (`openai/chat_completions`,
+/// `anthropic/messages`, …) to the short badge shown on the card.
+fn normalize_format(f: &str) -> String {
+    if f.contains("chat") {
+        "chat".into()
+    } else if f.contains("responses") {
+        "resp".into()
+    } else if f.contains("messages") {
+        "mess".into()
+    } else {
+        f.into()
+    }
 }
 
 /// Which gateway a row came from. The panel can show both at once, so every
@@ -282,10 +296,12 @@ impl Row {
                 .format
                 .clone()
                 .or_else(|| execution.and_then(|e| e.format.clone()))
-                .filter(|f| !f.is_empty()),
+                .filter(|f| !f.is_empty())
+                .map(|f| normalize_format(&f)),
             upstream_format: execution
                 .and_then(|e| e.format.clone())
-                .filter(|f| !f.is_empty()),
+                .filter(|f| !f.is_empty())
+                .map(|f| normalize_format(&f)),
             pass_through: execution
                 .and_then(|e| e.pass_through_applied)
                 .unwrap_or(false),
