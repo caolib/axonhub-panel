@@ -33,6 +33,61 @@ const FILTERS: [Filter; 4] = [
     Filter::Active,
 ];
 
+/// Colour palette for channel names. The first entry is the default light
+/// blue; subsequent entries distinguish other channels seen on the same page.
+const CHANNEL_PALETTE: [u32; 8] = [
+    theme::CYAN, // 0: light blue (default)
+    0xFFFF_6BC4, // 1: hot pink
+    0xFF4F_E0C0, // 2: turquoise
+    0xFFB9_8CFF, // 3: purple
+    0xFFFF_B454, // 4: amber
+    0xFF8D_E85B, // 5: lime
+    0xFFE0_6BFF, // 6: magenta
+    0xFFFF_6B6B, // 7: coral
+];
+
+/// Colour palette for model names. The first entry is white (default); later
+/// entries distinguish other models seen on the same page.
+const MODEL_PALETTE: [u32; 8] = [
+    theme::ORANGE, // 0: orange (default, matches AH badge)
+    theme::CYAN,   // 1: light blue
+    0xFFFF_6BC4,   // 2: hot pink
+    0xFFB9_8CFF, // 3: purple
+    0xFFFF_B454, // 4: amber
+    0xFF8D_E85B, // 5: lime
+    0xFFE0_6BFF, // 6: magenta
+    0xFFFF_6B6B, // 7: coral
+];
+
+/// Map each distinct channel in `rows` to a palette colour. The first channel
+/// seen gets the default light blue; later channels cycle through the rest.
+fn channel_palette(rows: &[Row]) -> Vec<(&str, u32)> {
+    let mut map: Vec<(&str, u32)> = Vec::new();
+    for row in rows {
+        if let Some(ch) = &row.channel {
+            if !map.iter().any(|(n, _)| *n == ch.as_str()) {
+                let color = CHANNEL_PALETTE[map.len() % CHANNEL_PALETTE.len()];
+                map.push((ch.as_str(), color));
+            }
+        }
+    }
+    map
+}
+
+/// Map each distinct served model in `rows` to a palette colour. The first
+/// model gets white; later models cycle through the rest.
+fn model_palette(rows: &[Row]) -> Vec<(&str, u32)> {
+    let mut map: Vec<(&str, u32)> = Vec::new();
+    for row in rows {
+        let model = row.served_model();
+        if !map.iter().any(|(n, _)| *n == model) {
+            let color = MODEL_PALETTE[map.len() % MODEL_PALETTE.len()];
+            map.push((model, color));
+        }
+    }
+    map
+}
+
 /// The card's internal measurements for one draw, already scaled to the monitor.
 #[derive(Clone, Copy)]
 struct CardMetrics {
@@ -260,12 +315,25 @@ fn draw_rows(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         Height: area.h,
     });
 
+    let ch_palette = channel_palette(v.rows);
+    let mdl_palette = model_palette(v.rows);
+
     for index in 0..v.rows.len() {
         let rect = m.card_rect(index, v.scroll);
         if rect.y + rect.h < area.y || rect.y > area.y + area.h {
             continue;
         }
-        draw_card(p, fonts, &v.rows[index], rect, v, index, m);
+        draw_card(
+            p,
+            fonts,
+            &v.rows[index],
+            rect,
+            v,
+            index,
+            m,
+            &ch_palette,
+            &mdl_palette,
+        );
     }
     p.reset_clip();
 }
@@ -279,6 +347,8 @@ fn draw_card(
     v: &ListView,
     index: usize,
     m: Metrics,
+    ch_palette: &[(&str, u32)],
+    mdl_palette: &[(&str, u32)],
 ) {
     let c = CardMetrics::new(m);
     let highlighted = v.hover == Some(index) || v.selected == Some(index);
@@ -447,6 +517,11 @@ fn draw_card(
 
     // Channel.
     if let Some(channel) = &row.channel {
+        let color = ch_palette
+            .iter()
+            .find(|(n, _)| *n == channel.as_str())
+            .map(|(_, c)| *c)
+            .unwrap_or(theme::CYAN);
         let w = p.dual_measure(&fonts.small, channel);
         if x + w < badge_limit {
             p.dual_text(
@@ -456,7 +531,7 @@ fn draw_card(
                 line1_y,
                 w + 2.0 * m.scale,
                 c.line1,
-                theme::CYAN,
+                color,
                 theme::ALIGN_NEAR,
             );
             x += w + 5.0 * m.scale;
@@ -528,11 +603,31 @@ fn draw_card(
 
     // Model name with reasoning effort, e.g. "glm-5.2(max)". Drawn on a soft
     // chip so the served model stands apart from the surrounding metrics.
+    // When the served model differs from the request, wrap it in 「」 instead
+    // of recolouring so the distinction is unambiguous.
     let model_label = row.served_model();
+    let routed = row.is_routed();
     let display = match &row.reasoning_effort {
-        Some(effort) => format!("{}({})", model_label, effort),
-        None => model_label.to_string(),
+        Some(effort) => {
+            if routed {
+                format!("「{}({})」", model_label, effort)
+            } else {
+                format!("{}({})", model_label, effort)
+            }
+        }
+        None => {
+            if routed {
+                format!("「{}」", model_label)
+            } else {
+                model_label.to_string()
+            }
+        }
     };
+    let model_color = mdl_palette
+        .iter()
+        .find(|(n, _)| *n == model_label)
+        .map(|(_, c)| *c)
+        .unwrap_or(theme::TEXT);
     let chip_hpad = 4.0 * m.scale;
     let chip_vpad = 2.0 * m.scale;
     let chip_w =
@@ -555,11 +650,7 @@ fn draw_card(
         y,
         text_w,
         c.line2,
-        if row.is_routed() {
-            theme::GOLD
-        } else {
-            theme::TEXT
-        },
+        model_color,
         theme::ALIGN_NEAR,
     );
     x += chip_w + line2_gap;

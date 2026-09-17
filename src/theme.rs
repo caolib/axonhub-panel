@@ -31,9 +31,6 @@ pub const CYAN: u32 = 0xFF79_C0FF;
 pub const RED: u32 = 0xFFF8_5149;
 pub const GRAY: u32 = 0xFF8B_949E;
 pub const YELLOW: u32 = 0xFFD2_9922;
-/// Marks a request served by a model other than the one requested. Deliberately
-/// brighter and yellower than `YELLOW`, which already means "pending" and "costly".
-pub const GOLD: u32 = 0xFFE8_B33A;
 /// Bright, unambiguous highlight for the 流 / 转 / 透 marks.
 pub const WHITE: u32 = 0xFF_FF_FF_FF;
 
