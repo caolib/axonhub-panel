@@ -312,6 +312,11 @@ fn clear_stored_in(dir: &Path) {
 /// to fit the work area when the display got smaller. `state.width`/`height` are
 /// device pixels; the minimums stay usable by scaling the logical floor.
 ///
+/// The result is always *wholly* inside `screen`: a borderless panel that hangs
+/// over an edge has no frame to grab back, and one straddling two monitors
+/// reads badly however it is moved. Callers therefore use this both for display
+/// changes and for clamping a move in flight.
+///
 /// The floor is lower in single-line mode: there the five-row preset is only
 /// ~176 logical pixels tall, so a 200-pixel minimum would stretch the window
 /// back out on the next resize or launch.
@@ -326,7 +331,7 @@ pub fn clamp_to_virtual_screen(
     let min_h = crate::ui::layout::device_px(if single_line { 110 } else { 200 }, scale);
     let width = state.width.clamp(min_w, (right - left).max(min_w));
     let height = state.height.clamp(min_h, (bottom - top).max(min_h));
-    let x = state.x.clamp(left - 8, (right - width).max(left));
+    let x = state.x.clamp(left, (right - width).max(left));
     let y = state.y.clamp(top, (bottom - height).max(top));
     WindowState {
         x,
@@ -540,5 +545,69 @@ mod tests {
         // panel to the compact layout.
         let back: Config = serde_json::from_str("{}").unwrap();
         assert!(!back.single_line);
+    }
+
+    #[test]
+    fn clamping_keeps_the_whole_window_on_one_monitor() {
+        let size = |x, y| WindowState {
+            x,
+            y,
+            width: 452,
+            height: 600,
+        };
+
+        // A monitor to the right of the primary one: positive coordinates.
+        let right = (1920, 0, 3840, 1040);
+        // Dragged past the right edge — pulled back to sit flush against it.
+        let placed = clamp_to_virtual_screen(size(3700, 100), right, 1.0, false);
+        assert_eq!((placed.x, placed.y), (3840 - 452, 100));
+        // Dragged below the work area — the taskbar strip is not usable space.
+        let placed = clamp_to_virtual_screen(size(2000, 900), right, 1.0, false);
+        assert_eq!(placed.y, 1040 - 600);
+        // Already inside: left exactly where it was.
+        let inside = size(2000, 100);
+        let placed = clamp_to_virtual_screen(inside, right, 1.0, false);
+        assert_eq!(
+            (placed.x, placed.y, placed.width, placed.height),
+            (2000, 100, 452, 600)
+        );
+
+        // A monitor left of the primary one: negative coordinates must clamp
+        // just as well, or the panel would jump back to the primary screen.
+        let left = (-1920, 0, 0, 1040);
+        let placed = clamp_to_virtual_screen(size(-2000, -50), left, 1.0, false);
+        assert_eq!((placed.x, placed.y), (-1920, 0));
+        let placed = clamp_to_virtual_screen(size(-2000, 100), left, 1.0, false);
+        assert_eq!(placed.x, -1920);
+
+        // Bigger than the work area: shrunk to it rather than left hanging off.
+        let placed = clamp_to_virtual_screen(size(0, 0), (0, 0, 1920, 1040), 1.0, false);
+        let huge = WindowState {
+            width: 3000,
+            height: 2000,
+            ..placed
+        };
+        let placed = clamp_to_virtual_screen(huge, (0, 0, 1920, 1040), 1.0, false);
+        assert_eq!((placed.width, placed.height), (1920, 1040));
+    }
+
+    #[test]
+    fn the_minimum_size_follows_the_layout_and_the_monitor_scale() {
+        let screen = (0, 0, 1920, 1040);
+        let tiny = WindowState {
+            x: 10,
+            y: 10,
+            width: 100,
+            height: 100,
+        };
+        // Two-line cards keep the authored 320x200 floor...
+        let placed = clamp_to_virtual_screen(tiny, screen, 1.0, false);
+        assert_eq!((placed.width, placed.height), (320, 200));
+        // ...single-line mode lets a short panel through...
+        let placed = clamp_to_virtual_screen(tiny, screen, 1.0, true);
+        assert_eq!((placed.width, placed.height), (320, 110));
+        // ...and both floors scale with the monitor density.
+        let placed = clamp_to_virtual_screen(tiny, screen, 2.0, false);
+        assert_eq!((placed.width, placed.height), (640, 400));
     }
 }

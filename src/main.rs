@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, CreateSolidBrush,
     DeleteDC, DeleteObject, EndPaint, FillRect, GetDeviceCaps, GetMonitorInfoW, HGDIOBJ, HORZSIZE,
     InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromPoint,
-    MonitorFromWindow, PAINTSTRUCT, SRCCOPY, SelectObject, VERTSIZE,
+    MonitorFromRect, MonitorFromWindow, PAINTSTRUCT, SRCCOPY, SelectObject, VERTSIZE,
 };
 use windows::Win32::Graphics::GdiPlus::{
     GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GdiplusStartupOutput,
@@ -811,6 +811,121 @@ fn work_area_at(x: i32, y: i32) -> (i32, i32, i32, i32) {
     (0, 0, 1920, 1080)
 }
 
+/// Work area of the monitor a proposed window rectangle belongs to, i.e. the
+/// one it overlaps most. Used while a move is still in flight: `MonitorFromWindow`
+/// would answer for the monitor the window is *leaving*, which is exactly the
+/// wrong screen to clamp a crossing drag against.
+fn work_area_of_rect(rect: &RECT) -> (i32, i32, i32, i32) {
+    unsafe {
+        let hmon = MonitorFromRect(rect, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(hmon, &mut info).as_bool() {
+            return (
+                info.rcWork.left,
+                info.rcWork.top,
+                info.rcWork.right,
+                info.rcWork.bottom,
+            );
+        }
+    }
+    (0, 0, 1920, 1080)
+}
+
+/// Pull a proposed *outer* window rectangle back inside `work`. The size is
+/// kept when it fits and shrunk to the work area when it does not, so the
+/// result is always wholly visible — the panel has no title bar, so a piece
+/// left off-screen could not be grabbed back.
+fn clamp_window_rect(rect: RECT, work: (i32, i32, i32, i32), hwnd: HWND) -> WindowState {
+    config::clamp_to_virtual_screen(
+        WindowState {
+            x: rect.left,
+            y: rect.top,
+            width: rect.right - rect.left,
+            height: rect.bottom - rect.top,
+        },
+        work,
+        window_scale(hwnd),
+        single_line_mode(),
+    )
+}
+
+/// Apply `clamp_window_rect` to a pending position/size change, honouring the
+/// `SWP_NOMOVE`/`SWP_NOSIZE` bits so a caller that only wants to resize does
+/// not get its origin moved.
+fn constrain_to_work_area(hwnd: HWND, wp: &mut WINDOWPOS) {
+    let reposition = !wp.flags.contains(SWP_NOMOVE);
+    let resize = !wp.flags.contains(SWP_NOSIZE);
+    if !reposition && !resize {
+        return;
+    }
+    let mut current = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut current);
+    }
+    let (left, top) = if reposition {
+        (wp.x, wp.y)
+    } else {
+        (current.left, current.top)
+    };
+    let (width, height) = if resize {
+        (wp.cx, wp.cy)
+    } else {
+        (current.right - current.left, current.bottom - current.top)
+    };
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let proposed = RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    };
+    let placed = clamp_window_rect(proposed, work_area_of_rect(&proposed), hwnd);
+    if reposition {
+        wp.x = placed.x;
+        wp.y = placed.y;
+    }
+    if resize {
+        wp.cx = placed.width;
+        wp.cy = placed.height;
+    }
+}
+
+/// Re-clamp the live window against the work area of the monitor it sits on now.
+///
+/// The modal loop behind a hand move is position-only, so a panel stretched on a
+/// large monitor would still be too big for a smaller one it was just dragged
+/// onto — `WM_MOVING` cannot shrink it, this can.
+fn fit_window_to_work_area(hwnd: HWND) {
+    let mut rect = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut rect);
+    }
+    let placed = clamp_window_rect(rect, work_area_for(hwnd), hwnd);
+    if placed.x == rect.left
+        && placed.y == rect.top
+        && placed.width == rect.right - rect.left
+        && placed.height == rect.bottom - rect.top
+    {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            placed.x,
+            placed.y,
+            placed.width,
+            placed.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
 fn apply_window_chrome(hwnd: HWND) {
     use windows::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute};
     unsafe {
@@ -911,6 +1026,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             return LRESULT(0);
         }
         WM_EXITSIZEMOVE => {
+            // A hand move or resize just ended. The modal loop only moves a
+            // window, so a panel stretched on a larger monitor is still too big
+            // for the one it was just dragged onto; make it fit before deriving
+            // the row count from its height.
+            fit_window_to_work_area(hwnd);
             // A manual resize changes how many rows fit; remember it and refetch
             // exactly that many so the list fills the window without overflow.
             let rows = current_visible_rows(hwnd);
@@ -921,16 +1041,58 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             actions.push(Action::Save);
             actions.push(Action::RefreshRowCount(rows));
         }
+        WM_SIZING => {
+            // Hand resize: keep the drag rectangle inside the work area of the
+            // monitor it is being dragged over, so the panel cannot be stretched
+            // off a screen either.
+            if lp.0 != 0 {
+                let rect = unsafe { &mut *(lp.0 as *mut RECT) };
+                let proposed = *rect;
+                let placed = clamp_window_rect(proposed, work_area_of_rect(&proposed), hwnd);
+                *rect = RECT {
+                    left: placed.x,
+                    top: placed.y,
+                    right: placed.x + placed.width,
+                    bottom: placed.y + placed.height,
+                };
+            }
+        }
+        WM_MOVING => {
+            // The user is dragging the panel. Clamp the drag rectangle to the
+            // work area of the monitor the cursor is over: the panel follows the
+            // pointer onto whichever screen it is on, but can never be dragged
+            // half off one.
+            if lp.0 != 0 {
+                let mut cursor = POINT::default();
+                unsafe {
+                    let _ = GetCursorPos(&mut cursor);
+                }
+                let rect = unsafe { &mut *(lp.0 as *mut RECT) };
+                let placed = clamp_window_rect(*rect, work_area_at(cursor.x, cursor.y), hwnd);
+                *rect = RECT {
+                    left: placed.x,
+                    top: placed.y,
+                    right: placed.x + placed.width,
+                    bottom: placed.y + placed.height,
+                };
+            }
+        }
         WM_WINDOWPOSCHANGING => {
-            // Keep the panel pinned to the bottom of the Z order when enabled:
-            // any attempt to raise it is redirected to HWND_BOTTOM so it never
-            // floats above other windows.
-            if State::with(|s| s.app.config.always_on_bottom).unwrap_or(false) {
-                let wp = lp.0 as *mut WINDOWPOS;
-                if !wp.is_null() {
+            let wp = lp.0 as *mut WINDOWPOS;
+            if !wp.is_null() {
+                // Keep the panel pinned to the bottom of the Z order when
+                // enabled: any attempt to raise it is redirected to HWND_BOTTOM
+                // so it never floats above other windows.
+                if State::with(|s| s.app.config.always_on_bottom).unwrap_or(false) {
                     unsafe {
                         (*wp).hwndInsertAfter = HWND_BOTTOM;
                     }
+                }
+                // Every move and resize funnels through here — a hand drag, the
+                // row-count menu, a monitor change — so this is the one place
+                // that can keep the borderless panel wholly on a screen.
+                unsafe {
+                    constrain_to_work_area(hwnd, &mut *wp);
                 }
             }
         }
@@ -1015,8 +1177,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_DISPLAYCHANGE => {
             // A resolution or monitor-configuration change can alter the
             // physical density of the screen the panel sits on without a
-            // Windows DPI change, so recompute the scale and refit.
+            // Windows DPI change, so recompute the scale and refit. `sync_scale`
+            // returns early when the scale is unchanged, so the work-area clamp
+            // is applied separately: a monitor that was just unplugged must not
+            // leave the panel stranded off-screen.
             sync_scale(hwnd);
+            fit_window_to_work_area(hwnd);
         }
         WM_COMMAND => on_command(wp, &mut actions),
         WM_CLOSE => actions.push(Action::Quit),
