@@ -7,7 +7,6 @@ mod client;
 mod config;
 mod format;
 mod model;
-mod octopus;
 mod theme;
 mod time;
 mod token;
@@ -53,7 +52,7 @@ use time::now_unix;
 use ui::layout::Metrics;
 use ui::login::{self, Action as LoginAction, Field, Method};
 use ui::panel::{self, ListView};
-use worker::{Command, OctopusHealth, Worker};
+use worker::{Command, Worker};
 
 const CLASS_NAME: &str = "AHPanelWindow";
 /// UTF-16 form of `CLASS_NAME`, keeping the literal alive for the window class.
@@ -117,56 +116,6 @@ fn clipboard_text() -> Option<String> {
 /// Whether Ctrl (or Shift for Ctrl+Shift+V) is held.
 fn ctrl_down() -> bool {
     unsafe { GetKeyState(VK_CONTROL.0 as i32) < 0 }
-}
-
-/// Pull the JWT out of whatever was copied from the browser: the bare value,
-/// `auth=…`, or a whole `Cookie:`/`Set-Cookie` line. Returns a user-facing
-/// error when nothing usable is there.
-fn parse_octopus_cookie(raw: &str) -> Result<String, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("剪贴板里没有可粘贴的内容".into());
-    }
-    // A copied request header says `Cookie:`, a copied response header says
-    // `Set-Cookie:`; neither is part of the value.
-    let lower = trimmed.to_ascii_lowercase();
-    let without_prefix = if lower.starts_with("set-cookie:") {
-        &trimmed["set-cookie:".len()..]
-    } else if lower.starts_with("cookie:") {
-        &trimmed["cookie:".len()..]
-    } else {
-        trimmed
-    }
-    .trim();
-
-    let candidate = without_prefix
-        .split(';')
-        .map(str::trim)
-        .find_map(|part| part.strip_prefix("auth="))
-        .unwrap_or(without_prefix)
-        .trim()
-        .trim_matches('"');
-
-    if !token::looks_like_jwt(candidate) {
-        return Err("不是有效的令牌:请复制浏览器 Cookie 里的 auth 值".into());
-    }
-    if token::is_expired(candidate, now_unix()) {
-        // Say *when* it expired: copying an old entry out of the Network panel
-        // is the usual mistake, and the date makes that obvious.
-        let when = token::expiry(candidate)
-            .and_then(crate::time::local_parts)
-            .map(|p| {
-                format!(
-                    "{:04}-{:02}-{:02} {:02}:{:02}",
-                    p.year, p.month, p.day, p.hour, p.minute
-                )
-            })
-            .unwrap_or_else(|| "未知时间".into());
-        return Err(format!(
-            "该令牌已于 {when} 过期,请重新登录后复制新的 auth Cookie"
-        ));
-    }
-    Ok(candidate.to_string())
 }
 
 /// Keep the scroll offset inside the range the current viewport allows.
@@ -284,10 +233,6 @@ const MENU_SINGLE_LINE: usize = 1204;
 /// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` = 24 px.
 const MENU_FONT_BASE: usize = 1500;
 const MENU_FONT_MAX: usize = MENU_FONT_BASE + 14;
-/// Octopus source: open its dashboard, paste its `auth` cookie, or forget it.
-const MENU_OCTOPUS_OPEN: usize = 1600;
-const MENU_OCTOPUS_PASTE: usize = 1601;
-const MENU_OCTOPUS_CLEAR: usize = 1602;
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -537,13 +482,6 @@ fn main() {
             .or_else(|| stored_token.clone())
             .filter(|t| !token::is_expired(t, now_unix()));
 
-        // The Octopus source is optional and independent of AxonHub's sign-in:
-        // its token is the `auth` cookie pasted from the browser.
-        let octopus_env = config::token_from_env(&config.octopus_token_env_var);
-        let octopus_token = octopus_env
-            .or_else(|| stored.as_ref().and_then(|s| s.octopus_token.clone()))
-            .filter(|t| !token::is_expired(t, now_unix()));
-
         // An expired token is a routine event (AxonHub issues 7-day tokens with
         // no refresh), so say so rather than letting the first poll 401.
         let expired_notice = startup_token
@@ -562,7 +500,7 @@ fn main() {
             })
             .flatten();
 
-        let worker = Worker::spawn(config.clone(), startup_token.clone(), octopus_token);
+        let worker = Worker::spawn(config.clone(), startup_token.clone());
 
         let Ok(instance) = windows::Win32::System::LibraryLoader::GetModuleHandleW(None) else {
             return;
@@ -1231,10 +1169,6 @@ enum Action {
     /// Toggle `WS_EX_NOACTIVATE` so the window can (or cannot) take focus.
     SetActivatable(bool),
     ClearCredentials,
-    /// Store the clipboard's Octopus `auth` cookie and hand it to the worker.
-    PasteOctopusToken,
-    /// Forget the Octopus cookie (the worker drops its rows too).
-    ClearOctopusToken,
     /// Paste the clipboard into the focused sign-in field.
     Paste,
     /// Clear the focused sign-in field.
@@ -1419,48 +1353,12 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                     s.app.token = None;
                     s.app.stored = Stored::default();
                     s.worker.send(Command::SetToken(String::new()));
-                    // The blob held the Octopus cookie too; drop it live so the
-                    // menu does not keep claiming a token exists.
-                    s.worker.send(Command::SetOctopusToken(None));
                     s.app.open_login(Some("已清除本机保存的凭据".into()), None);
                     if let Some(form) = s.app.login.take() {
                         s.app.login = Some(form.with_token(""));
                     }
                 });
                 sync_activation(&mut actions);
-                invalidate(hwnd);
-            }
-            Action::PasteOctopusToken => {
-                let message = match clipboard_text() {
-                    None => Err("剪贴板里没有可粘贴的内容".to_string()),
-                    Some(raw) => parse_octopus_cookie(&raw).map(|cookie| {
-                        let validity = token::describe(&cookie, now_unix());
-                        State::with(|s| {
-                            let mut stored = config::load_stored().unwrap_or_default();
-                            stored.octopus_token = Some(cookie.clone());
-                            s.app.config.store(&stored);
-                            s.app.stored = stored;
-                            s.worker.send(Command::SetOctopusToken(Some(cookie)));
-                        });
-                        format!("Octopus 令牌已保存({validity}),等待连接…")
-                    }),
-                };
-                let (text, is_error) = match message {
-                    Ok(text) => (text, false),
-                    Err(text) => (text, true),
-                };
-                State::with(|s| s.app.status = Some((text, is_error)));
-                invalidate(hwnd);
-            }
-            Action::ClearOctopusToken => {
-                State::with(|s| {
-                    let mut stored = config::load_stored().unwrap_or_default();
-                    stored.octopus_token = None;
-                    s.app.config.store(&stored);
-                    s.app.stored = stored;
-                    s.worker.send(Command::SetOctopusToken(None));
-                    s.app.status = Some(("已清除 Octopus 令牌".into(), false));
-                });
                 invalidate(hwnd);
             }
         }
@@ -1920,9 +1818,6 @@ fn submit_login(hwnd: HWND) {
                     email: String::new(),
                     password: None,
                     token: (mode != CredentialMode::None).then(|| token.clone()),
-                    // A pasted AxonHub token must not evict the Octopus cookie
-                    // that was stored earlier.
-                    octopus_token: s.app.stored.octopus_token.clone(),
                 };
                 s.app.config.store(&stored);
                 s.app.save();
@@ -1976,14 +1871,6 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
             );
             actions.push(Action::OpenUrl(url));
         }
-        MENU_OCTOPUS_OPEN => {
-            let url = model::octopus_url(&s.app.config.octopus_endpoint);
-            if !url.is_empty() {
-                actions.push(Action::OpenUrl(url));
-            }
-        }
-        MENU_OCTOPUS_PASTE => actions.push(Action::PasteOctopusToken),
-        MENU_OCTOPUS_CLEAR => actions.push(Action::ClearOctopusToken),
         MENU_CLEAR_CREDS => actions.push(Action::ClearCredentials),
         MENU_SIGNIN => actions.push(Action::OpenLogin(None)),
         MENU_QUIT => actions.push(Action::Quit),
@@ -2094,31 +1981,6 @@ fn show_menu(hwnd: HWND) {
         add("刷新", MENU_REFRESH, false, true);
         add("打开请求页", MENU_OPEN, false, true);
 
-        // Octopus source, present only when an endpoint is configured.
-        let (octopus_on, octopus_summary, octopus_has_token) = State::with(|s| {
-            (
-                !s.app.config.octopus_endpoint.trim().is_empty(),
-                s.app.octopus_summary(),
-                matches!(
-                    s.app.octopus_health,
-                    OctopusHealth::Connected | OctopusHealth::Error(_)
-                ),
-            )
-        })
-        .unwrap_or((false, None, false));
-        if octopus_on {
-            add("打开 Octopus 面板", MENU_OCTOPUS_OPEN, false, true);
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            if let Some(summary) = &octopus_summary {
-                // Status, not a command: grayed out and unclickable.
-                add(summary, 0, false, false);
-            }
-            add("粘贴 Octopus 令牌", MENU_OCTOPUS_PASTE, false, true);
-            if octopus_has_token {
-                add("清除 Octopus 令牌", MENU_OCTOPUS_CLEAR, false, true);
-            }
-        }
-
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add("清除保存的凭据", MENU_CLEAR_CREDS, false, true);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -2163,61 +2025,5 @@ fn open_url_async(url: &str) {
             PCWSTR::null(),
             SW_SHOWNOACTIVATE,
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Placeholder tokens: far-future and long-past, never real credentials.
-    const FRESH: &str =
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjk5OTk5OTk5OTl9.eyJzaWciOiJ4In0";
-    const STALE: &str =
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjEwMDAwMDAwMDB9.eyJzaWciOiJ4In0";
-
-    #[test]
-    fn accepts_every_shape_devtools_copies() {
-        // Application → Cookies → Value.
-        assert_eq!(parse_octopus_cookie(FRESH).unwrap(), FRESH);
-        // Request header value only.
-        assert_eq!(
-            parse_octopus_cookie(&format!("auth={FRESH}")).unwrap(),
-            FRESH
-        );
-        // Whole request header.
-        assert_eq!(
-            parse_octopus_cookie(&format!("Cookie: auth={FRESH}; Path=/")).unwrap(),
-            FRESH
-        );
-        // Whole response header.
-        assert_eq!(
-            parse_octopus_cookie(&format!(
-                "Set-Cookie: auth={FRESH}; Path=/; Max-Age=2592000"
-            ))
-            .unwrap(),
-            FRESH
-        );
-        // Quoted, padded, case-insensitive.
-        assert_eq!(
-            parse_octopus_cookie(&format!("  cookie: auth=\"{FRESH}\"  ")).unwrap(),
-            FRESH
-        );
-    }
-
-    #[test]
-    fn reports_when_a_stale_token_expired() {
-        let err = parse_octopus_cookie(STALE).unwrap_err();
-        assert!(err.contains("过期"), "unexpected message: {err}");
-        // The exact wall-clock moment comes from local_parts; only the shape
-        // is asserted here so the test does not depend on the machine's zone.
-        assert!(err.contains("20"), "unexpected message: {err}");
-    }
-
-    #[test]
-    fn rejects_what_is_not_a_token() {
-        assert!(parse_octopus_cookie("").is_err());
-        assert!(parse_octopus_cookie("management").is_err());
-        assert!(parse_octopus_cookie("sk-octopus-abc").is_err());
     }
 }

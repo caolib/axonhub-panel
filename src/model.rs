@@ -140,66 +140,6 @@ pub struct GraphqlError {
     pub message: String,
 }
 
-/// One Octopus request as sent on `/api/v1/log/overview/stream`.
-///
-/// Field names are the wire's own snake_case; the stream is served by Go, not
-/// by a GraphQL schema, so no renaming applies. `duration` is nanoseconds.
-#[derive(Debug, Clone, Deserialize)]
-pub struct OctopusRecord {
-    pub id: u64,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub started_at: Option<String>,
-    #[serde(default)]
-    pub duration: Option<i64>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub protocol: Option<u32>,
-    #[serde(default)]
-    pub api_key_name: Option<String>,
-    #[serde(default)]
-    pub usage: Option<OctopusUsage>,
-    #[serde(default)]
-    pub round: Option<i64>,
-    #[serde(default)]
-    pub target_channel: Option<String>,
-    #[serde(default)]
-    pub target_model: Option<String>,
-    #[serde(default)]
-    pub target_protocol: Option<u32>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct OctopusUsage {
-    #[serde(default)]
-    pub prompt_tokens: i64,
-    #[serde(default)]
-    pub total_tokens: i64,
-    #[serde(default)]
-    pub prompt_tokens_details: Option<OctopusPromptDetails>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct OctopusPromptDetails {
-    #[serde(default)]
-    pub cached_tokens: i64,
-}
-
-/// Wire protocol bit set by `model.Protocol` on the Octopus side:
-/// `OpenAIChatCompletion = 1 << 1`, `OpenAIResponse = 1 << 2`,
-/// `AnthropicMessage = 1 << 3`. Zero (and any unknown bit) is "not chosen".
-fn protocol_name(bits: Option<u32>) -> Option<String> {
-    let name = match bits? {
-        2 => "chat",
-        4 => "resp",
-        8 => "mess",
-        _ => return None,
-    };
-    Some(name.to_string())
-}
-
 /// Collapse a wire format string (`openai/chat_completions`,
 /// `anthropic/messages`, …) to the short badge shown on the card.
 fn normalize_format(f: &str) -> String {
@@ -214,31 +154,11 @@ fn normalize_format(f: &str) -> String {
     }
 }
 
-/// Which gateway a row came from. The panel can show both at once, so every
-/// row carries its origin for the badge and for opening the right page.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Source {
-    AxonHub,
-    Octopus,
-}
-
-impl Source {
-    /// Short tag shown on cards when the list mixes sources.
-    pub fn badge(self) -> &'static str {
-        match self {
-            Source::AxonHub => "AH",
-            Source::Octopus => "OCT",
-        }
-    }
-}
-
 /// A single row, pre-resolved so painting never walks the wire types.
 #[derive(Debug, Clone)]
 pub struct Row {
-    /// Full GUID, e.g. `gid://axonhub/Request/33188` (AxonHub) or the stream's
-    /// numeric id as text (Octopus, which has no deep link).
+    /// Full GUID, e.g. `gid://axonhub/Request/33188`.
     pub id: String,
-    pub source: Source,
     pub created_at: Option<String>,
     pub status: Status,
     pub model: String,
@@ -283,7 +203,6 @@ impl Row {
 
         Row {
             id: req.id.clone(),
-            source: Source::AxonHub,
             created_at: req.created_at.clone(),
             status: Status::parse(req.status.as_deref()),
             model: requested_model,
@@ -323,55 +242,13 @@ impl Row {
         }
     }
 
-    /// Build a row from one Octopus request-overview record.
-    ///
-    /// Octopus exposes less than AxonHub: no first-token latency, no
-    /// reasoning effort and no pass-through flag, so those stay empty; the
-    /// protocol is a small integer instead of a name.
-    pub fn from_octopus(rec: &OctopusRecord) -> Self {
-        let requested_model = rec.model.clone().unwrap_or_default();
-        let routed_model = rec
-            .target_model
-            .clone()
-            .filter(|m| !m.is_empty() && *m != requested_model);
-        let usage = rec.usage.as_ref();
-
-        Row {
-            id: rec.id.to_string(),
-            source: Source::Octopus,
-            created_at: rec.started_at.clone(),
-            status: Status::parse_octopus(rec.status.as_deref()),
-            model: requested_model,
-            routed_model,
-            channel: rec.target_channel.clone().filter(|c| !c.is_empty()),
-            caller: rec.api_key_name.clone().filter(|k| !k.is_empty()),
-            // `target_protocol` is only meaningful once a round has started;
-            // a zero bit means "not chosen yet", not "unknown protocol".
-            format: protocol_name(rec.protocol),
-            reasoning_effort: None,
-            upstream_format: protocol_name(rec.target_protocol),
-            pass_through: false,
-            stream: false,
-            // Go marshals `time.Duration` as nanoseconds.
-            latency_ms: rec.duration.map(|ns| ns / 1_000_000),
-            first_token_ms: None,
-            prompt_tokens: usage.map_or(0, |u| u.prompt_tokens),
-            total_tokens: usage.map_or(0, |u| u.total_tokens),
-            cached_tokens: usage
-                .and_then(|u| u.prompt_tokens_details.as_ref())
-                .map_or(0, |d| d.cached_tokens),
-            // The round counter is the retry count made visible.
-            attempt_count: rec.round.unwrap_or(0),
-        }
-    }
-
     /// Cache hit rate over the prompt, mirroring the requests page rule.
     pub fn cache_hit_rate(&self) -> Option<f64> {
         if self.cached_tokens <= 0 || self.prompt_tokens <= 0 {
             return None;
         }
-        // Octopus can report cached tokens beyond the prompt when rounds are
-        // summed; a rate above 100% would only read as a bug.
+        // Clamped so a rate above 100% — which would only read as a bug —
+        // cannot reach the card.
         Some((self.cached_tokens as f64 / self.prompt_tokens as f64 * 100.0).min(100.0))
     }
 
@@ -436,17 +313,6 @@ impl Row {
     }
 }
 
-/// Octopus's web UI has no per-request routes, so a row cannot be deep-linked;
-/// the best target is the dashboard the user would navigate from.
-pub fn octopus_url(endpoint: &str) -> String {
-    let base = endpoint.trim_end_matches('/');
-    if base.is_empty() {
-        String::new()
-    } else {
-        format!("{base}/")
-    }
-}
-
 /// Deep link to a request's detail page.
 ///
 /// The route matches the whole GUID as a single path segment, so it must be
@@ -505,7 +371,6 @@ mod tests {
     fn row_with(requested: &str, served: Option<&str>) -> Row {
         Row {
             id: format!("gid://axonhub/Request/1"),
-            source: Source::AxonHub,
             created_at: None,
             status: Status::Completed,
             model: requested.to_string(),
@@ -524,103 +389,6 @@ mod tests {
             cached_tokens: 0,
             attempt_count: 0,
         }
-    }
-
-    /// The exact shape observed on `/api/v1/log/overview/stream`.
-    const OCTOPUS_SAMPLE: &str = r#"{
-        "id": 75,
-        "status": "success",
-        "started_at": "2026-09-13T15:22:16.8747504+08:00",
-        "duration": 23908870800,
-        "model": "glm-5.3-flash",
-        "protocol": 2,
-        "group_id": 1,
-        "api_key_name": "omp",
-        "usage": {
-            "prompt_tokens": 63280,
-            "completion_tokens": 393,
-            "total_tokens": 63673,
-            "prompt_tokens_details": {"cached_tokens": 63280},
-            "completion_tokens_details": {"reasoning_tokens": 1}
-        },
-        "cost": 0.00484425,
-        "round": 1,
-        "round_started_at": "2026-09-13T15:22:16.8747504+08:00",
-        "target_channel": "fengwind",
-        "target_model": "glm-5.3-flash",
-        "target_protocol": 4,
-        "sending": false
-    }"#;
-
-    #[test]
-    fn octopus_record_maps_to_a_row() {
-        let rec: OctopusRecord = serde_json::from_str(OCTOPUS_SAMPLE).unwrap();
-        let row = Row::from_octopus(&rec);
-
-        assert_eq!(row.source, Source::Octopus);
-        assert_eq!(row.id, "75");
-        assert_eq!(row.status, Status::Completed);
-        assert_eq!(row.served_model(), "glm-5.3-flash");
-        assert_eq!(row.channel.as_deref(), Some("fengwind"));
-        assert_eq!(row.caller.as_deref(), Some("omp"));
-        // Nanoseconds to milliseconds, truncating the sub-millisecond tail.
-        assert_eq!(row.latency_ms, Some(23_908));
-        assert_eq!(row.prompt_tokens, 63_280);
-        assert_eq!(row.total_tokens, 63_673);
-        assert_eq!(row.cached_tokens, 63_280);
-        assert_eq!(row.attempt_count, 1);
-        // Chat inbound, Responses upstream: a conversion in flight.
-        assert!(row.protocol().is_converted());
-    }
-
-    #[test]
-    fn octopus_record_handles_a_running_request() {
-        let rec: OctopusRecord = serde_json::from_str(
-            r#"{
-                "id": 77, "status": "committed", "started_at": "2026-09-13T15:40:37.9+08:00",
-                "duration": 0, "model": "glm-5.3-flash", "protocol": 2, "group_id": 1,
-                "api_key_name": "omp",
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-                          "prompt_tokens_details": null, "completion_tokens_details": null},
-                "cost": 0, "round": 1, "round_started_at": "2026-09-13T15:40:37.9+08:00",
-                "target_channel": "fengwind", "target_model": "glm-5.3-flash",
-                "target_protocol": 0, "sending": false
-            }"#,
-        )
-        .unwrap();
-        let row = Row::from_octopus(&rec);
-
-        assert!(row.status.is_active(), "committed requests are in flight");
-        // A zero target protocol is "not yet chosen", not a protocol name.
-        assert_eq!(row.format.as_deref(), Some("chat"));
-        assert_eq!(row.upstream_format, None);
-        assert!(matches!(row.protocol(), Protocol::Single(_)));
-    }
-
-    #[test]
-    fn octopus_cache_rate_cannot_exceed_one_hundred_percent() {
-        // Seen in the wild: cached tokens summed across rounds outrun the prompt.
-        let rec: OctopusRecord = serde_json::from_str(
-            r#"{"id":1,"status":"success","model":"m","protocol":2,
-                "usage":{"prompt_tokens":100,"total_tokens":120,
-                         "prompt_tokens_details":{"cached_tokens":140}}}"#,
-        )
-        .unwrap();
-        let row = Row::from_octopus(&rec);
-        assert_eq!(row.cache_hit_rate(), Some(100.0));
-    }
-
-    #[test]
-    fn octopus_url_opens_the_dashboard() {
-        assert_eq!(
-            octopus_url("http://localhost:8091"),
-            "http://localhost:8091/"
-        );
-        assert_eq!(
-            octopus_url("http://localhost:8091/"),
-            "http://localhost:8091/"
-        );
-        assert_eq!(octopus_url(""), "");
     }
 
     #[test]
@@ -716,19 +484,6 @@ impl Status {
             "failed" => Status::Failed,
             "processing" => Status::Processing,
             "canceled" => Status::Canceled,
-            _ => Status::Pending,
-        }
-    }
-
-    /// Octopus states: `running` (choosing/waiting upstream), `committed`
-    /// (client already receiving the response, no retry possible), `success`,
-    /// `failed`, `canceled`. Both in-flight states map to processing.
-    fn parse_octopus(raw: Option<&str>) -> Self {
-        match raw.unwrap_or("") {
-            "success" => Status::Completed,
-            "failed" => Status::Failed,
-            "canceled" => Status::Canceled,
-            "running" | "committed" => Status::Processing,
             _ => Status::Pending,
         }
     }

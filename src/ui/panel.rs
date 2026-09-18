@@ -9,7 +9,7 @@
 use windows::Win32::Graphics::GdiPlus::RectF;
 
 use crate::format as fmt;
-use crate::model::{self, Filter, FilterMask, Row, Source};
+use crate::model::{self, Filter, FilterMask, Row};
 use crate::theme::{self, Painter};
 use crate::ui::layout::{Metrics, Rect};
 
@@ -46,10 +46,10 @@ const CHANNEL_PALETTE: [u32; 8] = [
     0xFFFF_6B6B, // 7: coral
 ];
 
-/// Colour palette for model names. The first entry is white (default); later
-/// entries distinguish other models seen on the same page.
+/// Colour palette for model names. The first entry is orange (the default);
+/// later entries distinguish other models seen on the same page.
 const MODEL_PALETTE: [u32; 8] = [
-    theme::ORANGE, // 0: orange (default, matches AH badge)
+    theme::ORANGE, // 0: orange (default)
     theme::CYAN,   // 1: light blue
     0xFFFF_6BC4,   // 2: hot pink
     0xFFB9_8CFF, // 3: purple
@@ -425,15 +425,14 @@ fn draw_card(
     let text_x = rect.x + c.inner_pad;
     let mut y = rect.y + c.accent_inset;
 
-    // --- Line 1: marks, caller, channel, source + time(right) ---
+    // --- Line 1: marks, caller, channel + time(right) ---
     let line1_y = y;
     let line1_gap = 6.0 * m.scale;
     let mut x = text_x;
     let mark_gap = 2.0 * m.scale;
 
-    // 流 (streaming) is AxonHub-only: Octopus's overview does not report
-    // whether the client streamed, and a faint mark would wrongly read as "no".
-    if row.source == Source::AxonHub {
+    // 流 (streaming): bright when the client streamed, faint when it did not.
+    {
         let w = p.dual_measure(&fonts.body, "流");
         p.dual_text(
             &fonts.body,
@@ -492,28 +491,10 @@ fn draw_card(
         x += w + line1_gap;
     }
 
-    // Time: right-aligned on line 1, with the source badge directly ahead of
-    // it when the list mixes gateways.
+    // Time: right-aligned on line 1.
     let time_text = fmt::relative_time(row.created_at.as_deref(), v.now);
     let time_w = p.dual_measure(&fonts.body, &time_text) + 4.0;
     let time_x = rect.x + rect.w - c.inner_pad - time_w;
-
-    // Source tag, showing which gateway served the request.
-    let badge = row.source.badge();
-    let badge_w = p.dual_measure(&fonts.small, badge);
-    p.dual_text(
-        &fonts.small,
-        badge,
-        time_x - badge_w - 6.0 * m.scale,
-        line1_y,
-        badge_w,
-        c.line2,
-        match row.source {
-            Source::AxonHub => theme::ORANGE,
-            Source::Octopus => theme::BLUE,
-        },
-        theme::ALIGN_NEAR,
-    );
 
     p.dual_text(
         &fonts.body,
@@ -526,14 +507,14 @@ fn draw_card(
         theme::ALIGN_FAR,
     );
 
-    // Remaining space between marks and the source badge.
-    let badge_limit = time_x - badge_w - 6.0 * m.scale - 4.0 * m.scale;
+    // Remaining space between the marks and the time.
+    let cells_limit = time_x - 4.0 * m.scale;
 
     // Protocol name (chat/responses/messages): the interface type the client
     // spoke, placed right after the marks so it sits beside its indicators.
     if let Some(name) = &row.format {
         let w = p.dual_measure(&fonts.small, name);
-        if x + w < badge_limit {
+        if x + w < cells_limit {
             p.dual_text(
                 &fonts.small,
                 name,
@@ -551,7 +532,7 @@ fn draw_card(
     // Caller (API key name).
     if let Some(caller) = &row.caller {
         let w = p.dual_measure(&fonts.small, caller);
-        if x + w < badge_limit {
+        if x + w < cells_limit {
             p.dual_text(
                 &fonts.small,
                 caller,
@@ -574,7 +555,7 @@ fn draw_card(
             .map(|(_, c)| *c)
             .unwrap_or(theme::CYAN);
         let w = p.dual_measure(&fonts.small, channel);
-        if x + w < badge_limit {
+        if x + w < cells_limit {
             p.dual_text(
                 &fonts.small,
                 channel,
@@ -593,7 +574,7 @@ fn draw_card(
     if row.total_tokens > 0 {
         let tokens = fmt::tokens_compact(row.total_tokens);
         let w = p.dual_measure(&fonts.small, &tokens);
-        if x + w < badge_limit {
+        if x + w < cells_limit {
             p.dual_text(
                 &fonts.small,
                 &tokens,
@@ -735,8 +716,8 @@ fn draw_card_single(
     let small_y = chip_y + c.chip_vpad;
     let body_y = rect.y + (rect.h - c.line1) / 2.0;
 
-    // --- Right cluster: time, source badge, TPS, retry. Placed first so the
-    // left cluster knows exactly how much room it has.
+    // --- Right cluster: time, TPS, retry. Placed first so the left cluster
+    // knows exactly how much room it has.
     let mut right = rect.x + rect.w - c.inner_pad;
 
     let time_text = fmt::relative_time(row.created_at.as_deref(), v.now);
@@ -752,24 +733,7 @@ fn draw_card_single(
         theme::TEXT_FAINT,
         theme::ALIGN_FAR,
     );
-    right = time_x - 6.0 * s;
-
-    let badge = row.source.badge();
-    let badge_w = p.dual_measure(&fonts.small, badge);
-    p.dual_text(
-        &fonts.small,
-        badge,
-        right - badge_w,
-        small_y,
-        badge_w,
-        c.line2,
-        match row.source {
-            Source::AxonHub => theme::ORANGE,
-            Source::Octopus => theme::BLUE,
-        },
-        theme::ALIGN_NEAR,
-    );
-    right -= badge_w + 8.0 * s;
+    right = time_x - 8.0 * s;
 
     if let Some(tps) = row.tps() {
         let label = format!("{tps:.0} tok/s");
@@ -830,37 +794,34 @@ fn draw_card_single(
     );
     x += chip_w + gap;
 
-    // Status marks. 流 is AxonHub-only: Octopus's overview does not report
-    // whether the client streamed, and a faint mark would wrongly read as "no".
-    // They are drawn as a group — showing 透 without 转 would misrepresent the
-    // row, so either all that apply fit or none are drawn.
-    let mut marks: Vec<(&str, u32)> = Vec::with_capacity(3);
-    if row.source == Source::AxonHub {
-        marks.push((
+    // Status marks, drawn as a group — showing 透 without 转 would
+    // misrepresent the row, so either all three fit or none are drawn.
+    let marks: [(&str, u32); 3] = [
+        (
             "流",
             if row.stream {
                 theme::WHITE
             } else {
                 theme::TEXT_FAINT
             },
-        ));
-    }
-    marks.push((
-        "转",
-        if row.protocol().is_converted() {
-            theme::YELLOW
-        } else {
-            theme::GREEN
-        },
-    ));
-    marks.push((
-        "透",
-        if row.pass_through {
-            theme::GREEN
-        } else {
-            theme::GRAY
-        },
-    ));
+        ),
+        (
+            "转",
+            if row.protocol().is_converted() {
+                theme::YELLOW
+            } else {
+                theme::GREEN
+            },
+        ),
+        (
+            "透",
+            if row.pass_through {
+                theme::GREEN
+            } else {
+                theme::GRAY
+            },
+        ),
+    ];
     let mark_gap = 1.0 * s;
     let marks_w: f32 = marks
         .iter()

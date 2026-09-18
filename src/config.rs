@@ -54,12 +54,6 @@ pub struct Config {
     /// Environment variable read for a token instead of using the sign-in form.
     /// Empty disables it. Lets the token stay out of the config file entirely.
     pub token_env_var: String,
-    /// Octopus gateway root, e.g. `http://localhost:8091`. Empty disables the
-    /// second source, in which case the panel behaves exactly as before.
-    pub octopus_endpoint: String,
-    /// Environment variable holding the Octopus `auth` cookie value (the JWT
-    /// only, without the `auth=` prefix). Beats the stored copy when set.
-    pub octopus_token_env_var: String,
     pub always_on_top: bool,
     pub pin_position: bool,
     pub always_on_bottom: bool,
@@ -117,8 +111,6 @@ impl Default for Config {
             row_limit: DEFAULT_ROWS as i64,
             credential_mode: CredentialMode::Token,
             token_env_var: "AXONHUB_ACCESS_TOKEN".into(),
-            octopus_endpoint: "http://localhost:8091".into(),
-            octopus_token_env_var: "OCTOPUS_AUTH_TOKEN".into(),
             font_size: 12.5,
             single_line: false,
             always_on_top: true,
@@ -140,9 +132,6 @@ pub struct Stored {
     pub email: String,
     pub password: Option<String>,
     pub token: Option<String>,
-    /// Octopus `auth` cookie value, pasted from the browser. Stored under the
-    /// same rules as `token`; it is a bearer credential, not a password.
-    pub octopus_token: Option<String>,
 }
 
 impl Stored {
@@ -237,7 +226,6 @@ fn filtered(mode: CredentialMode, stored: &Stored) -> Option<Stored> {
             email: stored.email.clone(),
             password: None,
             token: stored.token.clone(),
-            octopus_token: stored.octopus_token.clone(),
         }),
         CredentialMode::Password => Some(stored.clone()),
     }
@@ -252,7 +240,7 @@ fn store_in(dir: &Path, mode: CredentialMode, stored: &Stored) {
         clear_stored_in(dir);
         return;
     };
-    if record.token.is_none() && record.password.is_none() && record.octopus_token.is_none() {
+    if record.token.is_none() && record.password.is_none() {
         // Nothing worth keeping; do not leave an empty blob around.
         clear_stored_in(dir);
         return;
@@ -441,7 +429,6 @@ mod tests {
             email: "a@b".into(),
             password: Some("secret".into()),
             token: Some("tok".into()),
-            octopus_token: Some("oct".into()),
         }
     }
 
@@ -453,9 +440,6 @@ mod tests {
         let got = dir.load().expect("token should have been stored");
         assert_eq!(got.token.as_deref(), Some("tok"));
         assert_eq!(got.password, None, "token mode must not write a password");
-        // The Octopus cookie is a bearer token as well, so token mode may keep
-        // it without ever touching a password.
-        assert_eq!(got.octopus_token.as_deref(), Some("oct"));
     }
 
     #[test]
@@ -503,22 +487,9 @@ mod tests {
                 email: String::new(),
                 password: None,
                 token: None,
-                octopus_token: None,
             },
         );
         assert!(dir.load().is_none());
-
-        // A lone Octopus token is still worth keeping.
-        dir.store(
-            CredentialMode::Token,
-            &Stored {
-                email: String::new(),
-                password: None,
-                token: None,
-                octopus_token: Some("oct".into()),
-            },
-        );
-        assert_eq!(dir.load().unwrap().octopus_token.as_deref(), Some("oct"));
     }
 
     #[test]

@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn local_clock_is_derived_from_the_instant_not_the_wall_text() {
         // The same instant written with an offset must format identically to
-        // its UTC spelling, which is what Octopus's +08:00 timestamps need.
+        // its UTC spelling, which is what `+08:00` AxonHub timestamps need.
         let utc = local_parts(parse_unix("2026-09-12T02:20:57Z").unwrap());
         let offset = local_parts(parse_unix("2026-09-12T10:20:57+08:00").unwrap());
         assert_eq!(

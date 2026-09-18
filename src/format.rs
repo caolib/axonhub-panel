@@ -44,7 +44,7 @@ pub fn relative_time(iso: Option<&str>, now: i64) -> String {
 
 /// `HH:MM:SS` in local time, derived from the wire's RFC3339 instant.
 pub fn local_clock(iso: Option<&str>) -> String {
-    // Convert from the parsed instant rather than the literal text: Octopus
+    // Convert from the parsed instant rather than the literal text: AxonHub
     // sends `+08:00` timestamps whose date/time components are already local
     // to the gateway, and feeding those to the timezone API again would shift
     // them twice.
