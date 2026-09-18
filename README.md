@@ -75,16 +75,56 @@ cargo run --release
 |---|---|
 | 拖动标题栏/空白区域 | 移动面板 |
 | 拖动边缘 | 调整窗口大小(高度变化后自动调整拉取条数) |
-| 单击卡片 | 在浏览器中打开该请求详情 |
-
-> 详情页链接为 `/project/requests/{URL 编码后的 GUID}`,例如
-> `http://localhost:8090/project/requests/gid%3A%2F%2Faxonhub%2FRequest%2F34009`。
-> 该路由要求完整 GUID 且必须编码:`:` 和 `/` 不编码会落到 404,并提示
-> `guid must start with gid://axonhub/`。
+| 单击**带失败记录**的卡片 | 弹出错误详情(状态码、渠道、错误日志…),见下文 |
 | 滚轮 | 上下滚动 |
 | 右键 | 刷新 / 打开请求页 / 显示数量 / 字号 / 单行模式 / 清除凭据 / 固定窗口位置 / 置底 / 退出 |
 
-> 卡片区域不参与拖动,点卡片是「打开该请求」;窗口边缘 6px 内是缩放区。
+> 可点击的卡片 = 失败(`failed`)、取消(`canceled`),以及**最终成功但有失败尝试**的请求
+> (重试后成功,`attempt` 里有失败记录)。鼠标移上去会变手型;其余卡片整块都是窗口的拖动区,
+> 因此误点不会弹出任何东西。窗口边缘 6px 内是缩放区。
+
+### 错误详情弹窗
+
+点上面说的那类卡片,面板旁弹出一个详情窗。**默认只显示四件事** —— 看失败原因时够用,
+其余信息一键展开:
+
+```
+执行 1 · 已取消
+渠道:   feng-chat(openai)
+状态码: 429
+模型:   glm-5.3-flash(max)
+错误:   Concurrency limit exceeded for account, please retry later
+```
+
+AxonHub 会重试下一个渠道,所以一次失败的请求常有多条执行记录,按时间倒序逐条列出
+(每条都带上面四项;没有拿到状态码的那次显示 `—`)。
+
+点底部的「**完整信息**」展开完整文档(按钮随之变成「简化信息」):
+
+- **请求**:状态、模型(发生路由时套「」)、渠道、调用方、协议(两侧不同时显示
+  `chat → messages`)、流式、词元与缓存率、耗时(总/首字/tok·s)、绝对时间 + 相对时间;
+- **每次执行**:状态与 HTTP 状态码、渠道与上游地址(`baseURL`)、模型、起止时间与耗时、
+  上游请求地址、格式/透传,以及错误日志。
+
+同一个弹窗里切换卡片会保留当前选择的形态;重新打开面板则回到默认的简化视图。
+
+窗口支持:
+
+| 操作 | 说明 |
+|---|---|
+| 拖动 / 拖动边缘 | 移动、调整弹窗大小(同样不会跑出屏幕) |
+| 滚轮 / ↓ ↑ / PageUp PageDown / Home End | 滚动内容 |
+| `Esc` | 关闭 |
+| 「完整信息」/「简化信息」 | 在简化视图与完整文档之间切换 |
+| `Ctrl+C` 或「复制」 | 把当前显示的整份内容按 `标签: 值` 纯文本写入剪贴板 |
+| 「打开网页」 | 用浏览器打开该请求在 AxonHub 里的详情页 |
+| `×` | 关闭 |
+
+弹窗为独立窗口(面板的子窗口,始终在面板之上,随面板一起退出),最多只有一个 ——
+再点另一张失败卡片会直接替换内容。取数走 `GetRequestExecutions`,加载中显示
+「正在读取执行记录…」,失败则显示原因(例如令牌过期),不会卡住面板主循环。
+
+> 详情按需拉取:只有点了卡片才会请求,轮询仍只发列表查询。
 
 状态由卡片左侧色条表示,不显示文字标签:
 
@@ -186,7 +226,7 @@ JWT 有效期 7 天(`biz/auth.go`),且没有 refresh token。面板会在启动�
 
 ## 数据来源
 
-复用 AxonHub 前端 `GetRequests` 的字段选择:
+复用 AxonHub 前端的 `GetRequests` 的字段选择:
 
 ```
 POST {endpoint}/admin/graphql
@@ -197,7 +237,21 @@ query GetRequests($first, $where, $orderBy) { requests(...) { ... } }
 ```
 
 > `modelID`、`apiKey`、`clientIP` 是全大写缩写,不是标准 camelCase;
-> `serde(rename_all = "camelCase")` 会静默地把它们变成 `None`,故需显式 `rename`。
+> `serde(rename_all = "camelCase")` 会静默地把它们变成 `None`,故需显式 `rename`
+> (`requestURL`、`baseURL` 同理)。
+
+错误详情另发一次 `GetRequestExecutions`(同样来自前端详情页的查询),按请求 GUID 取执行记录:
+
+```
+query GetRequestExecutions($requestID: ID!, $first: Int, $orderBy: RequestExecutionOrder) {
+  node(id: $requestID) { ... on Request { executions(...) { edges { node { ... } } } } }
+}
+```
+
+> 详情页链接为 `/project/requests/{URL 编码后的 GUID}`,例如
+> `http://localhost:8090/project/requests/gid%3A%2F%2Faxonhub%2FRequest%2F34009`。
+> 该路由要求完整 GUID 且必须编码:`:` 和 `/` 不编码会落到 404,并提示
+> `guid must start with gid://axonhub/`。
 
 ## 结构
 
@@ -213,6 +267,7 @@ query GetRequests($first, $where, $orderBy) { requests(...) { ... } }
 | `theme.rs` | 配色、GDI+ 绘制原语、中英文分段绘制(`split_runs`) |
 | `ui/layout.rs` | 几何布局(纯计算,含 DPI 缩放,可测) |
 | `ui/panel.rs` | 请求卡片渲染 |
+| `ui/detail.rs` | 错误详情弹窗的内容模型、换行布局与绘制 |
 | `ui/login.rs` | 登录表单 |
 
 ### 两个实现要点

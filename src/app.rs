@@ -126,6 +126,10 @@ impl App {
                     self.rebuild();
                     self.status = None;
                 }
+                Update::Detail { .. } => {
+                    // Consumed by the window layer, which owns the detail popup;
+                    // `App` holds list state only.
+                }
                 Update::Failed(err) => {
                     // A token the server rejects is worse than useless: drop any
                     // stored copy so the next launch does not retry it silently.
@@ -194,13 +198,6 @@ impl App {
         self.rebuild();
     }
 
-    /// Record a click on the request list, returning the URL to open.
-    pub fn click_row(&mut self, index: usize) -> Option<String> {
-        self.selected = Some(index);
-        let row = self.rows.get(index)?;
-        Some(model::request_url(&self.config.endpoint, &row.id))
-    }
-
     /// Persist anything that changed while running.
     pub fn save(&self) {
         self.config.save();
@@ -232,6 +229,7 @@ mod tests {
             total_tokens: 0,
             cached_tokens: 0,
             attempt_count: 1,
+            failed_attempts: 0,
         }
     }
 

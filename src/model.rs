@@ -65,6 +65,7 @@ pub struct UsageLog {
 pub struct Execution {
     #[serde(rename = "modelID")]
     pub model_id: Option<String>,
+    pub status: Option<String>,
     pub format: Option<String>,
     pub reasoning_effort: Option<String>,
     pub pass_through_applied: Option<bool>,
@@ -75,6 +76,7 @@ impl Default for Execution {
     fn default() -> Self {
         Execution {
             model_id: None,
+            status: None,
             format: None,
             reasoning_effort: None,
             pass_through_applied: None,
@@ -129,8 +131,8 @@ pub struct RequestsData {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Envelope {
-    pub data: Option<RequestsData>,
+pub struct Envelope<T> {
+    pub data: Option<T>,
     #[serde(default)]
     pub errors: Vec<GraphqlError>,
 }
@@ -138,6 +140,63 @@ pub struct Envelope {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GraphqlError {
     pub message: String,
+}
+
+/// The channel an execution ran against, with the endpoint it dialled. The
+/// list query only needs a name; the detail popup is where `type`/`baseURL`
+/// matter, so they are fetched only for it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelDetail {
+    pub name: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    #[serde(rename = "baseURL")]
+    pub base_url: Option<String>,
+}
+
+/// One upstream attempt of a request. A failed request usually carries several
+/// — AxonHub retries the next channel — so the popup lists them all and the
+/// error is per execution, not per request.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionDetail {
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    #[serde(rename = "modelID")]
+    pub model_id: Option<String>,
+    pub format: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub pass_through_applied: Option<bool>,
+    pub status: Option<String>,
+    pub response_status_code: Option<i64>,
+    pub error_message: Option<String>,
+    /// `requestURL`, not `requestUrl`: the acronym is spelled out in the
+    /// schema, and a wrong rename fails silently (see the module header).
+    #[serde(rename = "requestURL")]
+    pub request_url: Option<String>,
+    pub channel: Option<ChannelDetail>,
+    pub metrics_first_token_latency_ms: Option<i64>,
+    pub metrics_reasoning_duration_ms: Option<i64>,
+}
+
+impl ExecutionDetail {
+    pub fn status(&self) -> Status {
+        Status::parse(self.status.as_deref())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestWithExecutions {
+    pub executions: Option<Connection<ExecutionDetail>>,
+}
+
+/// Answer to the `GetRequestExecutions` query: `node(id:)` resolves to the
+/// request, whose `executions` connection carries the attempts.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetailData {
+    pub node: Option<RequestWithExecutions>,
 }
 
 /// Collapse a wire format string (`openai/chat_completions`,
@@ -181,6 +240,10 @@ pub struct Row {
     pub cached_tokens: i64,
     /// Number of upstream attempts; above one means retries happened.
     pub attempt_count: i64,
+    /// How many of the fetched attempts did not succeed. A request that ended
+    /// well can still carry failures here, which is what makes its detail worth
+    /// opening.
+    pub failed_attempts: i64,
 }
 
 impl Row {
@@ -239,6 +302,22 @@ impl Row {
                 .as_ref()
                 .and_then(|c| c.total_count)
                 .unwrap_or(0),
+            failed_attempts: req
+                .executions
+                .as_ref()
+                .map(|c| {
+                    c.edges
+                        .iter()
+                        .filter_map(|e| e.node.as_ref())
+                        .filter(|e| {
+                            matches!(
+                                Status::parse(e.status.as_deref()),
+                                Status::Failed | Status::Canceled
+                            )
+                        })
+                        .count() as i64
+                })
+                .unwrap_or(0),
         }
     }
 
@@ -287,6 +366,27 @@ impl Row {
     /// Whether the request was served by a model other than the one requested.
     pub fn is_routed(&self) -> bool {
         self.routed_model.is_some()
+    }
+
+    /// Whether the request has anything worth explaining, i.e. whether its card
+    /// opens the detail popup: it failed or was canceled, or it only succeeded
+    /// after an attempt failed. Walking the retries is the point of the popup,
+    /// so a request that recovered is as interesting as one that did not.
+    pub fn is_error(&self) -> bool {
+        matches!(self.status, Status::Failed | Status::Canceled) || self.failed_attempts > 0
+    }
+
+    /// The served model with its reasoning effort, e.g. `glm-5.2(max)`. When the
+    /// served model differs from the requested one, it is wrapped in 「」 instead
+    /// of recoloured so the distinction is unambiguous.
+    pub fn display_model(&self) -> String {
+        let model = self.served_model();
+        match (&self.reasoning_effort, self.is_routed()) {
+            (Some(effort), true) => format!("「{}({})」", model, effort),
+            (Some(effort), false) => format!("{}({})", model, effort),
+            (None, true) => format!("「{}」", model),
+            (None, false) => model.to_string(),
+        }
     }
 
     /// How the inbound and upstream protocols relate, for the card's protocol
@@ -388,6 +488,7 @@ mod tests {
             total_tokens: 0,
             cached_tokens: 0,
             attempt_count: 0,
+            failed_attempts: 0,
         }
     }
 
@@ -445,6 +546,62 @@ mod tests {
         assert_eq!(plain.served_model(), "glm-5.2");
         assert!(!plain.is_routed());
     }
+
+    fn wire_request(json: &str) -> Request {
+        serde_json::from_str(json).expect("request parses")
+    }
+
+    #[test]
+    fn a_request_that_recovered_after_a_failure_is_still_trouble() {
+        // The `GetRequests` shape: the final attempt succeeded, an earlier one
+        // did not. The retry is what the detail popup exists to show.
+        let req = wire_request(
+            r#"{
+              "id": "gid://axonhub/Request/1",
+              "status": "completed",
+              "modelID": "glm-5.2",
+              "executions": { "totalCount": 2, "edges": [
+                { "node": { "status": "completed", "modelID": "glm-5.2" } },
+                { "node": { "status": "failed", "modelID": "glm-5.2" } }
+              ] }
+            }"#,
+        );
+        let row = Row::from_wire(&req);
+        assert_eq!(row.status, Status::Completed);
+        assert_eq!(row.attempt_count, 2);
+        assert_eq!(row.failed_attempts, 1);
+        assert!(row.is_error(), "a failed attempt makes the card clickable");
+    }
+
+    #[test]
+    fn a_request_without_failed_attempts_has_nothing_to_open() {
+        let req = wire_request(
+            r#"{
+              "id": "gid://axonhub/Request/2",
+              "status": "completed",
+              "modelID": "glm-5.2",
+              "executions": { "totalCount": 1, "edges": [
+                { "node": { "status": "completed", "modelID": "glm-5.2" } }
+              ] }
+            }"#,
+        );
+        let row = Row::from_wire(&req);
+        assert_eq!(row.failed_attempts, 0);
+        assert!(!row.is_error());
+
+        // An execution without a status must not be read as a failure.
+        let req = wire_request(
+            r#"{
+              "id": "gid://axonhub/Request/3",
+              "status": "completed",
+              "modelID": "glm-5.2",
+              "executions": { "totalCount": 1, "edges": [ { "node": {} } ] }
+            }"#,
+        );
+        let row = Row::from_wire(&req);
+        assert_eq!(row.failed_attempts, 0);
+        assert!(!row.is_error());
+    }
 }
 
 /// Relationship between the protocol the client spoke and the one used upstream.
@@ -478,13 +635,25 @@ pub enum Status {
 }
 
 impl Status {
-    fn parse(raw: Option<&str>) -> Self {
+    pub fn parse(raw: Option<&str>) -> Self {
         match raw.unwrap_or("") {
             "completed" => Status::Completed,
             "failed" => Status::Failed,
             "processing" => Status::Processing,
             "canceled" => Status::Canceled,
             _ => Status::Pending,
+        }
+    }
+
+    /// Label for the detail popup, which names the state rather than encoding
+    /// it as a colour the way the cards do.
+    pub fn label(self) -> &'static str {
+        match self {
+            Status::Completed => "成功",
+            Status::Failed => "失败",
+            Status::Processing => "进行中",
+            Status::Canceled => "已取消",
+            Status::Pending => "等待中",
         }
     }
 

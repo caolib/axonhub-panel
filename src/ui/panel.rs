@@ -52,11 +52,11 @@ const MODEL_PALETTE: [u32; 8] = [
     theme::ORANGE, // 0: orange (default)
     theme::CYAN,   // 1: light blue
     0xFFFF_6BC4,   // 2: hot pink
-    0xFFB9_8CFF, // 3: purple
-    0xFFFF_B454, // 4: amber
-    0xFF8D_E85B, // 5: lime
-    0xFFE0_6BFF, // 6: magenta
-    0xFFFF_6B6B, // 7: coral
+    0xFFB9_8CFF,   // 3: purple
+    0xFFFF_B454,   // 4: amber
+    0xFF8D_E85B,   // 5: lime
+    0xFFE0_6BFF,   // 6: magenta
+    0xFFFF_6B6B,   // 7: coral
 ];
 
 /// Map each distinct channel in `rows` to a palette colour. The first channel
@@ -388,19 +388,6 @@ fn draw_card_chrome(
     );
 }
 
-/// The served model with its reasoning effort, e.g. `glm-5.2(max)`. When the
-/// served model differs from the requested one, it is wrapped in 「」 instead of
-/// recoloured so the distinction is unambiguous.
-fn model_label(row: &Row) -> String {
-    let model = row.served_model();
-    match (&row.reasoning_effort, row.is_routed()) {
-        (Some(effort), true) => format!("「{}({})」", model, effort),
-        (Some(effort), false) => format!("{}({})", model, effort),
-        (None, true) => format!("「{}」", model),
-        (None, false) => model.to_string(),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn draw_card(
     p: &Painter,
@@ -635,7 +622,7 @@ fn draw_card(
 
     // Model name with reasoning effort, e.g. "glm-5.2(max)". Drawn on a soft
     // chip so the served model stands apart from the surrounding metrics.
-    let display = model_label(row);
+    let display = row.display_model();
     let model_color = mdl_palette
         .iter()
         .find(|(n, _)| *n == row.served_model())
@@ -773,7 +760,7 @@ fn draw_card_single(
     // --- Left cluster: model chip first. It is the row's identity, so it is
     // always drawn, compressed to whatever room is left if need be.
     let mut x = rect.x + c.inner_pad;
-    let display = model_label(row);
+    let display = row.display_model();
     let model_color = mdl_palette
         .iter()
         .find(|(n, _)| *n == row.served_model())
@@ -994,6 +981,17 @@ pub fn hit_row(m: Metrics, v: &ListView, x: f32, y: f32) -> Option<usize> {
     m.row_at(y, v.scroll, v.rows.len())
 }
 
+/// The card a point is over whose detail can be opened, if any. Those are the
+/// only cards that take a click: everything else stays a drag handle, so a
+/// stray press can never open anything. Pinned mode is display-only.
+pub fn hit_error_row(m: Metrics, v: &ListView, x: f32, y: f32) -> Option<usize> {
+    if v.pinned {
+        return None;
+    }
+    let index = hit_row(m, v, x, y)?;
+    v.rows.get(index).filter(|r| r.is_error()).map(|_| index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,6 +1070,60 @@ mod tests {
         let m = Metrics::new(452.0, 300.0, 1.0);
         let v = view(&[], true);
         assert!(hit_filter(m, &v, 10.0, 10.0).is_none());
+    }
+
+    fn row(status: Status) -> Row {
+        Row {
+            id: String::new(),
+            created_at: None,
+            status,
+            model: String::new(),
+            routed_model: None,
+            channel: None,
+            caller: None,
+            format: None,
+            reasoning_effort: None,
+            upstream_format: None,
+            pass_through: false,
+            stream: false,
+            latency_ms: None,
+            first_token_ms: None,
+            prompt_tokens: 0,
+            total_tokens: 0,
+            cached_tokens: 0,
+            attempt_count: 0,
+            failed_attempts: 0,
+        }
+    }
+
+    #[test]
+    fn only_cards_with_something_to_explain_are_clickable() {
+        let m = Metrics::new(452.0, 300.0, 1.0);
+        // A request that ended well, but only after an attempt failed, is as
+        // clickable as one that failed outright.
+        let mut recovered = row(Status::Completed);
+        recovered.failed_attempts = 1;
+        let rows = vec![
+            row(Status::Completed),
+            recovered,
+            row(Status::Failed),
+            row(Status::Canceled),
+            row(Status::Processing),
+        ];
+        let v = view(&rows, false);
+        let middle = |index: usize| m.rows_top() + index as f32 * m.pitch() + m.card_h / 2.0;
+
+        assert_eq!(hit_error_row(m, &v, 100.0, middle(0)), None);
+        assert_eq!(hit_error_row(m, &v, 100.0, middle(1)), Some(1));
+        assert_eq!(hit_error_row(m, &v, 100.0, middle(2)), Some(2));
+        assert_eq!(hit_error_row(m, &v, 100.0, middle(3)), Some(3));
+        assert_eq!(hit_error_row(m, &v, 100.0, middle(4)), None);
+        // Outside the card area nothing hits, error or not.
+        assert_eq!(hit_error_row(m, &v, 100.0, m.header_h / 2.0), None);
+
+        // Pinned mode makes the whole list display-only, like the chips.
+        let pinned = view(&rows, true);
+        assert_eq!(hit_error_row(m, &pinned, 100.0, middle(2)), None);
     }
 
     #[test]

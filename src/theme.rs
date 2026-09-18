@@ -335,6 +335,12 @@ impl Painter {
             .sum()
     }
 
+    /// Break `text` into lines that fit `max_w`, using this painter's real font
+    /// metrics. Newlines in the input always start a new line.
+    pub fn wrap(&self, font: &DualFont, text: &str, max_w: f32) -> Vec<String> {
+        wrap_by(text, max_w, |s| self.dual_measure(font, s))
+    }
+
     pub fn text(
         &self,
         font: *mut GpFont,
@@ -432,17 +438,6 @@ impl Drop for Painter {
 /// per-glyph API call on every paint, and the ranges below cover what this
 /// panel actually renders (Chinese labels and full-width punctuation).
 pub fn split_runs(s: &str) -> Vec<(&str, bool)> {
-    fn is_cjk(c: char) -> bool {
-        matches!(c as u32,
-            0x3000..=0x303F |   // CJK punctuation
-            0x3400..=0x4DBF |   // extension A
-            0x4E00..=0x9FFF |   // unified ideographs
-            0xF900..=0xFAFF |   // compatibility ideographs
-            0xFF00..=0xFFEF |   // full-width forms
-            0x20000..=0x2FA1F
-        )
-    }
-
     let mut runs: Vec<(&str, bool)> = Vec::new();
     let mut start = 0usize;
     let mut current: Option<bool> = None;
@@ -462,6 +457,138 @@ pub fn split_runs(s: &str) -> Vec<(&str, bool)> {
         runs.push((&s[start..], kind));
     }
     runs
+}
+
+/// Whether `c` is drawn with the CJK face. See `split_runs` for why the ranges
+/// are enumerated rather than queried from the font.
+pub fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3000..=0x303F |   // CJK punctuation
+        0x3400..=0x4DBF |   // extension A
+        0x4E00..=0x9FFF |   // unified ideographs
+        0xF900..=0xFAFF |   // compatibility ideographs
+        0xFF00..=0xFFEF |   // full-width forms
+        0x20000..=0x2FA1F
+    )
+}
+
+/// Break `text` into lines that fit `max_w` according to `measure`.
+///
+/// Pure so it can be exercised without a device context (`Painter::wrap` binds
+/// it to real font metrics). Latin breaks fall between words and CJK breaks
+/// between characters, which is how the two scripts are read; a single token
+/// wider than the whole column — a long URL, a hash — is broken by character so
+/// nothing is dropped.
+pub fn wrap_by(text: &str, max_w: f32, measure: impl Fn(&str) -> f32) -> Vec<String> {
+    let max_w = max_w.max(1.0);
+    let mut out: Vec<String> = Vec::new();
+    for para in text.split('\n') {
+        let mut line = String::new();
+        for token in tokens(para) {
+            if token.trim().is_empty() {
+                // A run of spaces only matters between two words; a leading one
+                // is dropped so wrapped lines start flush.
+                if !line.is_empty() {
+                    line.push_str(token);
+                }
+                continue;
+            }
+            if line.trim().is_empty() {
+                line.clear();
+                push_token(&mut line, &mut out, token, max_w, &measure);
+                continue;
+            }
+            let joined = format!("{line}{token}");
+            if measure(joined.trim_end()) <= max_w {
+                line = joined;
+            } else {
+                out.push(line.trim_end().to_string());
+                line = String::new();
+                push_token(&mut line, &mut out, token, max_w, &measure);
+            }
+        }
+        out.push(line.trim_end().to_string());
+    }
+    out
+}
+
+/// Append `token` to `line`, emitting whole lines while it does not fit.
+fn push_token(
+    line: &mut String,
+    out: &mut Vec<String>,
+    token: &str,
+    max_w: f32,
+    measure: &impl Fn(&str) -> f32,
+) {
+    let mut rest = token;
+    loop {
+        if measure(rest) <= max_w {
+            line.push_str(rest);
+            return;
+        }
+        let cut = fitting_prefix(rest, max_w, measure);
+        if cut == 0 {
+            // A single character wider than the column: keep it rather than
+            // spin forever on a token that can never fit.
+            line.push_str(rest);
+            return;
+        }
+        out.push(rest[..cut].to_string());
+        rest = &rest[cut..];
+    }
+}
+
+/// Byte length of the longest prefix of `s` whose width stays within `max_w`.
+fn fitting_prefix(s: &str, max_w: f32, measure: &impl Fn(&str) -> f32) -> usize {
+    let mut width = 0.0;
+    for (i, c) in s.char_indices() {
+        width += measure(&s[i..i + c.len_utf8()]);
+        if width > max_w {
+            return i;
+        }
+    }
+    s.len()
+}
+
+/// Break `s` into the smallest pieces a line break may fall between. Every
+/// slice together reproduces `s` exactly.
+fn tokens(s: &str) -> Vec<&str> {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Kind {
+        Space,
+        Word,
+        Cjk,
+    }
+    fn kind_of(c: char) -> Kind {
+        if c.is_whitespace() {
+            Kind::Space
+        } else if is_cjk(c) {
+            Kind::Cjk
+        } else {
+            Kind::Word
+        }
+    }
+
+    let mut out: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    let mut kind: Option<Kind> = None;
+    for (i, c) in s.char_indices() {
+        let k = kind_of(c);
+        match kind {
+            None => kind = Some(k),
+            // CJK characters each stand alone; other runs stay together.
+            Some(prev) if prev != k || k == Kind::Cjk => {
+                out.push(&s[start..i]);
+                start = i;
+                kind = Some(k);
+            }
+            _ => {}
+        }
+    }
+    if !s.is_empty() {
+        out.push(&s[start..]);
+    }
+    out
 }
 
 /// Replace a colour's alpha channel.
@@ -521,5 +648,53 @@ mod tests {
             runs(" 完成 "),
             vec![(" ", false), ("完成", true), (" ", false)]
         );
+    }
+
+    /// Stand-in for the monospaced face: one unit per character, so a test
+    /// budget of N * 10 is exactly N characters.
+    fn mono(s: &str) -> f32 {
+        s.chars().count() as f32 * 10.0
+    }
+
+    #[test]
+    fn wraps_latin_between_words() {
+        assert_eq!(
+            wrap_by("alpha beta gamma", 100.0, mono),
+            vec!["alpha beta", "gamma"]
+        );
+    }
+
+    #[test]
+    fn wraps_cjk_between_characters() {
+        assert_eq!(wrap_by("中文中文", 20.0, mono), vec!["中文", "中文"]);
+    }
+
+    #[test]
+    fn breaks_a_token_wider_than_the_column() {
+        let url = "https://example.com/very/long/path";
+        let lines = wrap_by(url, 40.0, mono);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|l| mono(l) <= 40.0), "{lines:?}");
+        assert_eq!(lines.concat(), url);
+    }
+
+    #[test]
+    fn newlines_start_a_new_line() {
+        assert_eq!(wrap_by("a\nb", 100.0, mono), vec!["a", "b"]);
+        // An empty paragraph survives as an empty line.
+        assert_eq!(wrap_by("a\n\nb", 100.0, mono), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn wrapping_keeps_every_character() {
+        for text in [
+            "failed to do request: HTTP request failed: Post \"https://api.example.com/v1/chat/completions?beta=true\": context canceled",
+            "Concurrency limit exceeded for account, please retry later",
+            "模型 glm-5.3-flash 在渠道 aliyun 上返回 429",
+        ] {
+            let joined: String = wrap_by(text, 120.0, mono).join(" ");
+            let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+            assert_eq!(strip(&joined), strip(text), "text was mangled: {text}");
+        }
     }
 }

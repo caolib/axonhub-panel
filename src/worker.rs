@@ -9,10 +9,13 @@ use std::time::{Duration, Instant};
 
 use crate::client::{ApiError, Client, SignInResponse};
 use crate::config::{Config, Credentials};
-use crate::model::Row;
+use crate::model::{ExecutionDetail, Row};
 
 /// Upper bound on a requests query before the panel gives up on it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+/// A detail query is clicked, not polled: it gets its own shorter leash so a
+/// gateway that hangs cannot keep the popup spinning for long.
+const DETAIL_TIMEOUT: Duration = Duration::from_secs(10);
 const SIGNIN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Longest sleep, so queued commands are noticed promptly without spinning.
 const TICK: Duration = Duration::from_millis(200);
@@ -27,6 +30,11 @@ pub enum Update {
     Snapshot {
         rows: Vec<Row>,
         total: i64,
+    },
+    /// Answer to `FetchDetail`: the attempts recorded for one request.
+    Detail {
+        id: String,
+        result: Result<Vec<ExecutionDetail>, ApiError>,
     },
     Failed(ApiError),
     /// No usable token; the UI must show the sign-in form.
@@ -44,6 +52,8 @@ pub enum Command {
     RefreshNow,
     /// Adopt a new row count (the UI derives it from the window height).
     SetRowLimit(i64),
+    /// Fetch one request's executions, for its detail popup.
+    FetchDetail(String),
     Shutdown,
 }
 
@@ -104,11 +114,13 @@ fn run(
 ) {
     let client = Client::new(REQUEST_TIMEOUT);
     let signin_client = Client::new(SIGNIN_TIMEOUT);
+    let detail_client = Client::new(DETAIL_TIMEOUT);
 
     let mut paused = false;
     let mut backoff = Duration::ZERO;
     let mut force = true;
     let mut pending_creds: Option<Credentials> = None;
+    let mut pending_detail: Option<String> = None;
     let mut next_poll = Instant::now();
     // Emit the signed-out notice once per transition rather than every idle
     // tick, which would otherwise force a pointless repaint each second.
@@ -143,10 +155,27 @@ fn run(
                     next_poll = Instant::now();
                     force = true;
                 }
+                Command::FetchDetail(id) => pending_detail = Some(id),
             }
         }
         if shutdown {
             return;
+        }
+
+        // Served inline, ahead of the poll: the user is looking at the popup,
+        // and a click deserves the answer even if the list refresh slips a
+        // cycle. One request at a time, so a click storm cannot stack up.
+        if let Some(id) = pending_detail.take() {
+            let result = match token.clone() {
+                Some(current) => detail_client.fetch_request_executions(
+                    &config.graphql_url(),
+                    &current,
+                    &config.project_id,
+                    &id,
+                ),
+                None => Err(ApiError::Unauthorized),
+            };
+            let _ = updates.send(Update::Detail { id, result });
         }
 
         if let Some(creds) = pending_creds.take() {

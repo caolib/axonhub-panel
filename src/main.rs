@@ -15,7 +15,9 @@ mod worker;
 
 use std::cell::RefCell;
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, CreateSolidBrush,
     DeleteDC, DeleteObject, EndPaint, FillRect, GetDeviceCaps, GetMonitorInfoW, HGDIOBJ, HORZSIZE,
@@ -26,15 +28,19 @@ use windows::Win32::Graphics::GdiPlus::{
     GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GdiplusStartupOutput,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+use windows::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SetFocus, VK_A, VK_C, VK_CONTROL, VK_V, VK_X,
+    GetKeyState, SetFocus, VK_A, VK_C, VK_CONTROL, VK_DOWN, VK_END, VK_HOME, VK_NEXT, VK_PRIOR,
+    VK_UP, VK_V, VK_X,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_BACK, VK_ESCAPE, VK_RETURN, VK_TAB,
@@ -49,12 +55,16 @@ use app::{App, View};
 use config::{Config, CredentialMode, Credentials, Stored, WindowState};
 use theme::{Fonts, Painter};
 use time::now_unix;
+use ui::detail::{self, Button};
 use ui::layout::Metrics;
 use ui::login::{self, Action as LoginAction, Field, Method};
 use ui::panel::{self, ListView};
-use worker::{Command, Worker};
+use worker::{Command, Update, Worker};
 
 const CLASS_NAME: &str = "AHPanelWindow";
+/// The error-detail popup's class. A second window rather than an overlay: the
+/// document is larger than the panel and outlives any single frame of it.
+const DETAIL_CLASS: &str = "AHDetailWindow";
 /// UTF-16 form of `CLASS_NAME`, keeping the literal alive for the window class.
 const CLASS_WIDE: [u16; 14] = [
     b'A' as u16,
@@ -238,10 +248,35 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
+/// The error-detail popup, while it is open. There is at most one: opening a
+/// second request's detail replaces the content instead of stacking windows.
+struct DetailPopup {
+    hwnd: HWND,
+    /// The card the popup was opened from. The fetched executions belong to it.
+    row: model::Row,
+    /// Deep link to the request's page in the console.
+    url: String,
+    /// The upstream attempts, once fetched. Kept so switching between the
+    /// compact and the full document does not need another round trip.
+    executions: Option<Vec<model::ExecutionDetail>>,
+    /// Rendered from `executions` for the current `depth`.
+    doc: Option<detail::Doc>,
+    /// Why the fetch failed; replaces the document when set.
+    error: Option<String>,
+    /// Whether the document is the compact or the full one.
+    depth: detail::Depth,
+    scroll: f32,
+    /// Content height as measured by the last paint, so a wheel event between
+    /// two frames can clamp the offset without laying the document out again.
+    content_h: f32,
+    hover: Option<Button>,
+}
+
 struct State {
     app: App,
     worker: Worker,
     fonts: Fonts,
+    detail: Option<DetailPopup>,
     /// Whether the window currently lacks `WS_EX_NOACTIVATE`, i.e. can take
     /// keyboard focus. Mirrors `app.is_login()`.
     activatable: bool,
@@ -345,11 +380,14 @@ fn hit_test(m: Metrics, x: f32, y: f32) -> isize {
                 .as_ref()
                 .is_some_and(|form| login::hit(form, m, x, y).is_some())
         } else {
-            // Cards are not clickable: the whole surface is a drag handle so
-            // a stray click can never open a browser. The request detail page
-            // is reachable from the right-click menu instead. The header
-            // filter chips are the exception.
-            panel::hit_filter(m, &list_view(s), x, y).is_some()
+            // A card is otherwise a drag handle, so a stray click can never
+            // open anything; a card with something to explain — a request that
+            // failed, or one that only succeeded after a failed attempt — is the
+            // exception, since there the reason is one click away. The header
+            // filter chips are clickable too.
+            let view = list_view(s);
+            panel::hit_filter(m, &view, x, y).is_some()
+                || panel::hit_error_row(m, &view, x, y).is_some()
         }
     })
     .unwrap_or(false);
@@ -515,6 +553,20 @@ fn main() {
         };
         RegisterClassW(&wc);
 
+        // The detail popup's class: same drawing, separate lifetime.
+        let detail_class: Vec<u16> = DETAIL_CLASS
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let detail_wc = WNDCLASSW {
+            lpfnWndProc: Some(detail_proc),
+            hInstance: instance.into(),
+            lpszClassName: PCWSTR(detail_class.as_ptr()),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            ..Default::default()
+        };
+        RegisterClassW(&detail_wc);
+
         let prefill = stored.as_ref().and_then(|s| s.credentials());
         let mut app = App::new(config.clone(), startup_token, prefill.clone());
 
@@ -544,6 +596,7 @@ fn main() {
             app,
             worker,
             fonts: Fonts::load(1.0),
+            detail: None,
             activatable: wants_focus,
             scale: 1.0,
         };
@@ -1048,7 +1101,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
         }
         WM_LBUTTONDOWN => on_left_down(hwnd, lp, &mut actions),
-        WM_LBUTTONUP => on_left_up(hwnd, lp),
+        WM_LBUTTONUP => on_left_up(hwnd, lp, &mut actions),
         WM_RBUTTONUP | WM_CONTEXTMENU | WM_NCRBUTTONUP => actions.push(Action::ShowMenu),
         WM_MOUSEWHEEL => on_wheel(hwnd, wp, &mut actions),
         WM_KEYDOWN | WM_CHAR | WM_SYSKEYDOWN => on_key(hwnd, msg, wp, &mut actions),
@@ -1126,6 +1179,13 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_CLOSE => actions.push(Action::Quit),
         WM_DESTROY => {
             save_window_state(hwnd);
+            // Owned windows go down with their owner anyway; closing the popup
+            // here keeps the teardown explicit and its state cleanup ordered.
+            if let Some(popup) = State::with(|s| s.detail.take().map(|p| p.hwnd)).flatten() {
+                unsafe {
+                    let _ = DestroyWindow(popup);
+                }
+            }
             unsafe {
                 let _ = KillTimer(Some(hwnd), TIMER_POLL);
                 let _ = KillTimer(Some(hwnd), TIMER_CARET);
@@ -1168,6 +1228,14 @@ enum Action {
     SetSingleLine(bool),
     /// Toggle `WS_EX_NOACTIVATE` so the window can (or cannot) take focus.
     SetActivatable(bool),
+    /// Open the error-detail popup for a row of the list.
+    ShowDetail(usize),
+    /// Switch the open detail document between compact and full.
+    ToggleDetail,
+    /// Close the window whose own proc raised this action.
+    CloseWindow,
+    /// Copy the open detail document to the clipboard.
+    CopyDetail,
     ClearCredentials,
     /// Paste the clipboard into the focused sign-in field.
     Paste,
@@ -1345,6 +1413,29 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 sync_activation(&mut actions);
                 invalidate(hwnd);
             }
+            Action::ShowDetail(index) => open_detail(hwnd, index),
+            Action::ToggleDetail => {
+                let popup = State::with(|s| {
+                    let open = s.detail.as_mut()?;
+                    open.depth = match open.depth {
+                        detail::Depth::Compact => detail::Depth::Full,
+                        detail::Depth::Full => detail::Depth::Compact,
+                    };
+                    rebuild_doc(open);
+                    // The two documents have nothing in common position-wise.
+                    open.scroll = 0.0;
+                    Some((open.hwnd, open.depth))
+                })
+                .flatten();
+                if let Some((hwnd, depth)) = popup {
+                    fit_detail_height(hwnd, window_scale(hwnd), depth);
+                    invalidate(hwnd);
+                }
+            }
+            Action::CloseWindow => unsafe {
+                let _ = DestroyWindow(hwnd);
+            },
+            Action::CopyDetail => copy_detail_text(),
             Action::ClearCredentials => {
                 config::clear_stored();
                 // Reopen on the token tab, since a cleared credential is
@@ -1485,19 +1576,72 @@ fn on_timer(hwnd: HWND, id: usize, actions: &mut Vec<Action>) {
 
 /// Apply worker output; the list redraws only when something actually changed.
 fn pump_worker(actions: &mut Vec<Action>) {
+    let mut popup: Option<HWND> = None;
     let changed = State::with(|s| {
         let updates = s.worker.drain();
         if updates.is_empty() {
             return false;
         }
+        // Detail answers belong to the popup, not the list; everything else is
+        // list state.
+        let mut rest = Vec::with_capacity(updates.len());
+        for update in updates {
+            match update {
+                Update::Detail { id, result } => apply_detail(s, &id, result),
+                other => rest.push(other),
+            }
+        }
         let worker = &s.worker;
-        s.app.apply_updates(updates, worker);
+        s.app.apply_updates(rest, worker);
+        popup = s.detail.as_ref().map(|p| p.hwnd);
         true
     });
     if changed == Some(true) {
         actions.push(Action::Redraw);
+        // The popup is a separate window: `Action::Redraw` only reaches the one
+        // that raised it.
+        if let Some(hwnd) = popup {
+            invalidate(hwnd);
+        }
         sync_activation(actions);
     }
+}
+
+/// Store one request's executions in the open popup. A reply for a request the
+/// user has already clicked away from is dropped rather than painted over the
+/// newer content.
+fn apply_detail(
+    s: &mut State,
+    id: &str,
+    result: Result<Vec<model::ExecutionDetail>, client::ApiError>,
+) {
+    let Some(open) = s.detail.as_mut() else {
+        return;
+    };
+    if open.row.id != id {
+        return;
+    }
+    match result {
+        Ok(executions) => {
+            open.executions = Some(executions);
+            open.error = None;
+        }
+        Err(err) => {
+            open.executions = None;
+            open.error = Some(err.message());
+        }
+    }
+    rebuild_doc(open);
+    open.scroll = 0.0;
+}
+
+/// Re-render the document for the current depth. Cheap — it is string assembly
+/// — so it runs whenever the attempts arrive or the depth is toggled.
+fn rebuild_doc(open: &mut DetailPopup) {
+    open.doc = open
+        .executions
+        .as_ref()
+        .map(|executions| detail::Doc::build(&open.row, executions, now_unix(), open.depth));
 }
 
 /// The window must be activatable exactly while the sign-in form is showing.
@@ -1631,27 +1775,27 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
     let _ = hwnd;
 }
 
-fn on_left_up(hwnd: HWND, lp: LPARAM) {
+fn on_left_up(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
     let x = (lp.0 & 0xFFFF) as i16 as f32;
     let y = ((lp.0 >> 16) & 0xFFFF) as i16 as f32;
     let m = metrics_for(hwnd);
 
-    // Only open the request if the pointer is still over the row it went down
-    // on, so dragging off a card cancels the action. Pinned mode is display-only.
-    let url = State::with(|s| {
+    // Only act if the pointer is still over the card it went down on, so
+    // dragging off cancels the action; pinned mode is display-only. Only a card
+    // with something to explain can get here — `hit_test` leaves every other
+    // one as the window's drag handle.
+    let index = State::with(|s| {
         if s.app.is_login() || s.app.config.pin_position {
             return None;
         }
-        let index = panel::hit_row(m, &list_view(s), x, y)?;
-        if s.app.selected != Some(index) {
-            return None;
-        }
-        s.app.click_row(index)
+        let view = list_view(s);
+        let index = panel::hit_error_row(m, &view, x, y)?;
+        (s.app.selected == Some(index)).then_some(index)
     })
     .flatten();
 
-    if let Some(url) = url {
-        open_url_async(&url);
+    if let Some(index) = index {
+        actions.push(Action::ShowDetail(index));
     }
 }
 
@@ -2026,4 +2170,557 @@ fn open_url_async(url: &str) {
             SW_SHOWNOACTIVATE,
         );
     }
+}
+
+// --- error-detail popup ------------------------------------------------------
+
+/// Metrics for the popup's client area. The scale is the panel's rather than
+/// the popup's own monitor: the popup draws with the panel's fonts, so a
+/// different scale would size the boxes for text that is not being drawn.
+fn detail_metrics(hwnd: HWND) -> detail::Popup {
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut rc);
+    }
+    let scale = State::with(|s| s.scale).unwrap_or_else(|| window_scale(hwnd));
+    detail::Popup::new(
+        (rc.right - rc.left) as f32,
+        (rc.bottom - rc.top) as f32,
+        scale,
+    )
+}
+
+/// The popup's resting place: beside the panel when the work area has room on
+/// either side, otherwise against the work-area edge, over the panel.
+fn detail_geometry(panel: HWND, scale: f32, depth: detail::Depth) -> WindowState {
+    let work = work_area_for(panel);
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(panel, &mut rc);
+    }
+    let width = ui::layout::device_px(detail::POPUP_W as i32, scale);
+    let height = ui::layout::device_px(detail::default_height(depth) as i32, scale);
+    let gap = (8.0 * scale).round() as i32;
+    let mut x = rc.left - gap - width;
+    if x < work.0 {
+        x = rc.right + gap;
+    }
+    if x + width > work.2 {
+        x = work.2 - width;
+    }
+    let mut y = rc.top;
+    if y + height > work.3 {
+        y = work.3 - height;
+    }
+    config::clamp_to_virtual_screen(
+        WindowState {
+            x,
+            y,
+            width,
+            height,
+        },
+        work,
+        scale,
+        false,
+    )
+}
+
+/// Give the popup the height its form is authored for, keeping its top-left
+/// corner and staying on screen. Called when the form changes, so the full
+/// document is not read through a letterbox and the compact one is not shown in
+/// a half-empty window.
+fn fit_detail_height(hwnd: HWND, scale: f32, depth: detail::Depth) {
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut rc);
+    }
+    let work = work_area_for(hwnd);
+    let height =
+        ui::layout::device_px(detail::default_height(depth) as i32, scale).min(work.3 - work.1);
+    let placed = config::clamp_to_virtual_screen(
+        WindowState {
+            x: rc.left,
+            y: rc.top,
+            width: rc.right - rc.left,
+            height,
+        },
+        work,
+        scale,
+        false,
+    );
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            placed.x,
+            placed.y,
+            placed.width,
+            placed.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Create the popup window. It is owned by the panel, so it always stays above
+/// it and goes away with it.
+fn create_detail_window(panel: HWND, geom: WindowState) -> Option<HWND> {
+    let instance = unsafe { GetModuleHandleW(None) }.ok()?;
+    let class: Vec<u16> = DETAIL_CLASS
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let title: Vec<u16> = "请求详情"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut ex_style = WS_EX_TOOLWINDOW;
+    if State::with(|s| s.app.config.always_on_top).unwrap_or(false) {
+        ex_style |= WS_EX_TOPMOST;
+    }
+    let hwnd = unsafe {
+        CreateWindowExW(
+            ex_style,
+            PCWSTR(class.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            WS_POPUP,
+            geom.x,
+            geom.y,
+            geom.width,
+            geom.height,
+            Some(panel),
+            None,
+            Some(instance.into()),
+            None,
+        )
+    }
+    .ok()?;
+    apply_window_chrome(hwnd);
+    Some(hwnd)
+}
+
+/// The form the popup opens in: whichever is already on screen, so a reader who
+/// asked for the full document keeps it while walking through several failures.
+/// A fresh popup starts compact.
+fn current_depth() -> detail::Depth {
+    State::with(|s| s.detail.as_ref().map(|open| open.depth))
+        .flatten()
+        .unwrap_or(detail::Depth::Compact)
+}
+
+/// Open — or refocus — the detail popup for a row of the list.
+fn open_detail(panel: HWND, index: usize) {
+    enum Next {
+        /// This request is already on screen; just raise the window.
+        Focus(HWND),
+        /// Fetch the executions; `None` means the window still has to be built.
+        Load(Option<HWND>, Box<model::Row>, String, f32),
+    }
+
+    // Read before borrowing the state below: `current_depth` uses the same cell.
+    let depth = current_depth();
+    let prepared = State::with(|s| {
+        let row = s.app.rows.get(index)?.clone();
+        if let Some(open) = s.detail.as_ref().filter(|p| p.row.id == row.id) {
+            // Clicking the same card again must not throw the answer away.
+            return Some(Next::Focus(open.hwnd));
+        }
+        let url = model::request_url(&s.app.config.endpoint, &row.id);
+        let existing = s.detail.as_ref().map(|p| p.hwnd);
+        Some(Next::Load(existing, Box::new(row), url, s.scale))
+    })
+    .flatten();
+
+    let Some(next) = prepared else {
+        return;
+    };
+    match next {
+        Next::Focus(hwnd) => unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(hwnd);
+        },
+        Next::Load(existing, row, url, scale) => {
+            let hwnd = match existing {
+                Some(hwnd) => hwnd,
+                None => match create_detail_window(
+                    panel,
+                    detail_geometry(panel, scale, current_depth()),
+                ) {
+                    Some(hwnd) => hwnd,
+                    None => return,
+                },
+            };
+            let id = row.id.clone();
+            State::with(|s| {
+                s.detail = Some(DetailPopup {
+                    hwnd,
+                    row: *row,
+                    url,
+                    executions: None,
+                    doc: None,
+                    error: None,
+                    depth,
+                    scroll: 0.0,
+                    content_h: 0.0,
+                    hover: None,
+                });
+                s.worker.send(Command::FetchDetail(id));
+            });
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(hwnd);
+                let _ = SetFocus(Some(hwnd));
+            }
+            invalidate(hwnd);
+        }
+    }
+}
+
+/// Put the whole detail document on the clipboard.
+fn copy_detail_text() {
+    let text = State::with(|s| {
+        s.detail
+            .as_ref()
+            .and_then(|p| p.doc.as_ref())
+            .map(detail::plain_text)
+    })
+    .flatten();
+    if let Some(text) = text {
+        set_clipboard_text(&text);
+    }
+}
+
+/// Put `text` on the clipboard as `CF_UNICODETEXT`, replacing its contents. A
+/// clipboard another process is holding is left alone: copying is a nicety.
+fn set_clipboard_text(text: &str) {
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return;
+        }
+        let _ = EmptyClipboard();
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        if let Ok(handle) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * std::mem::size_of::<u16>()) {
+            let ptr = GlobalLock(handle) as *mut u16;
+            if ptr.is_null() {
+                let _ = GlobalFree(Some(handle));
+            } else {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+                let _ = GlobalUnlock(handle);
+                // Ownership passes to the clipboard; only a failed hand-off
+                // leaves us holding the block.
+                if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(handle.0))).is_err() {
+                    let _ = GlobalFree(Some(handle));
+                }
+            }
+        }
+        let _ = CloseClipboard();
+    }
+}
+
+unsafe extern "system" fn detail_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let mut actions: Vec<Action> = Vec::new();
+
+    match msg {
+        WM_PAINT => paint_detail(hwnd),
+        WM_ERASEBKGND => {}
+        WM_NCHITTEST => {
+            let mut rc = RECT::default();
+            unsafe {
+                let _ = GetWindowRect(hwnd, &mut rc);
+            }
+            let x = (lp.0 & 0xFFFF) as i16 as f32 - rc.left as f32;
+            let y = ((lp.0 >> 16) & 0xFFFF) as i16 as f32 - rc.top as f32;
+            let popup = detail_metrics(hwnd);
+            if detail::hit_button(&popup, x, y).is_some() {
+                return LRESULT(HTCLIENT as isize);
+            }
+            let m = Metrics::new(popup.width, popup.height, popup.scale);
+            if let Some(edge) = edge_at(m, x, y) {
+                return LRESULT(edge.hit_test() as isize);
+            }
+            // Everything else is the window's drag handle.
+            return LRESULT(HTCAPTION as isize);
+        }
+        WM_SETCURSOR => {
+            let mut cursor = POINT::default();
+            let mut rc = RECT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut cursor);
+                let _ = GetWindowRect(hwnd, &mut rc);
+            }
+            let popup = detail_metrics(hwnd);
+            let x = (cursor.x - rc.left) as f32;
+            let y = (cursor.y - rc.top) as f32;
+            let m = Metrics::new(popup.width, popup.height, popup.scale);
+            let shape = match edge_at(m, x, y) {
+                Some(edge) => edge.cursor_id(),
+                None if detail::hit_button(&popup, x, y).is_some() => IDC_HAND,
+                None => IDC_ARROW,
+            };
+            if let Ok(handle) = unsafe { LoadCursorW(None, shape) } {
+                unsafe {
+                    SetCursor(Some(handle));
+                }
+                return LRESULT(1);
+            }
+        }
+        WM_MOUSEMOVE => detail_mouse_move(hwnd, lp, &mut actions),
+        WM_MOUSELEAVE => {
+            let changed =
+                State::with(|s| s.detail.as_mut().is_some_and(|p| p.hover.take().is_some()));
+            if changed == Some(true) {
+                actions.push(Action::Redraw);
+            }
+        }
+        WM_LBUTTONUP => {
+            let x = (lp.0 & 0xFFFF) as i16 as f32;
+            let y = ((lp.0 >> 16) & 0xFFFF) as i16 as f32;
+            let popup = detail_metrics(hwnd);
+            match detail::hit_button(&popup, x, y) {
+                Some(Button::Close) => actions.push(Action::CloseWindow),
+                Some(Button::Toggle) => actions.push(Action::ToggleDetail),
+                Some(Button::Copy) => actions.push(Action::CopyDetail),
+                Some(Button::Open) => {
+                    let url = State::with(|s| s.detail.as_ref().map(|p| p.url.clone())).flatten();
+                    if let Some(url) = url {
+                        actions.push(Action::OpenUrl(url));
+                    }
+                }
+                None => {}
+            }
+        }
+        WM_MOUSEWHEEL => detail_wheel(hwnd, wp, &mut actions),
+        WM_KEYDOWN => detail_key(hwnd, wp, &mut actions),
+        WM_GETMINMAXINFO => {
+            let scale = window_scale(hwnd);
+            let info = unsafe { &mut *(lp.0 as *mut MINMAXINFO) };
+            info.ptMinTrackSize = POINT {
+                x: (detail::MIN_W * scale) as i32,
+                y: (detail::MIN_H * scale) as i32,
+            };
+            return LRESULT(0);
+        }
+        WM_SIZING => {
+            if lp.0 != 0 {
+                let rect = unsafe { &mut *(lp.0 as *mut RECT) };
+                let proposed = *rect;
+                let placed = clamp_window_rect(proposed, work_area_of_rect(&proposed), hwnd);
+                *rect = RECT {
+                    left: placed.x,
+                    top: placed.y,
+                    right: placed.x + placed.width,
+                    bottom: placed.y + placed.height,
+                };
+            }
+        }
+        WM_MOVING => {
+            if lp.0 != 0 {
+                let mut cursor = POINT::default();
+                unsafe {
+                    let _ = GetCursorPos(&mut cursor);
+                }
+                let rect = unsafe { &mut *(lp.0 as *mut RECT) };
+                let placed = clamp_window_rect(*rect, work_area_at(cursor.x, cursor.y), hwnd);
+                *rect = RECT {
+                    left: placed.x,
+                    top: placed.y,
+                    right: placed.x + placed.width,
+                    bottom: placed.y + placed.height,
+                };
+            }
+        }
+        WM_WINDOWPOSCHANGING => {
+            let window_pos = lp.0 as *mut WINDOWPOS;
+            if !window_pos.is_null() {
+                unsafe {
+                    constrain_to_work_area(hwnd, &mut *window_pos);
+                }
+            }
+        }
+        WM_SIZE => actions.push(Action::Redraw),
+        WM_DPICHANGED => {
+            // The popup keeps the panel's scale, but it still has to take the
+            // rectangle Windows suggests for the monitor it landed on.
+            if lp.0 != 0 {
+                let suggested = unsafe { &*(lp.0 as *const RECT) };
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+            }
+            actions.push(Action::Redraw);
+        }
+        WM_DISPLAYCHANGE => {
+            fit_window_to_work_area(hwnd);
+            actions.push(Action::Redraw);
+        }
+        WM_CLOSE => actions.push(Action::CloseWindow),
+        WM_DESTROY => {
+            State::with(|s| s.detail = None);
+        }
+        _ => return unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
+    }
+
+    run_actions(hwnd, actions);
+    LRESULT(0)
+}
+
+fn detail_mouse_move(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
+    let x = (lp.0 & 0xFFFF) as i16 as f32;
+    let y = ((lp.0 >> 16) & 0xFFFF) as i16 as f32;
+    let popup = detail_metrics(hwnd);
+    let hover = detail::hit_button(&popup, x, y);
+
+    let changed = State::with(|s| {
+        let Some(open) = s.detail.as_mut() else {
+            return false;
+        };
+        if open.hover == hover {
+            return false;
+        }
+        open.hover = hover;
+        true
+    });
+    unsafe {
+        let mut tme = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        let _ = TrackMouseEvent(&mut tme);
+    }
+    if changed == Some(true) {
+        actions.push(Action::Redraw);
+    }
+}
+
+fn detail_wheel(hwnd: HWND, wp: WPARAM, actions: &mut Vec<Action>) {
+    let delta = ((wp.0 >> 16) & 0xFFFF) as u16 as i16 as f32 / 120.0;
+    let m = detail_metrics(hwnd);
+    let step = m.row_h() * 3.0;
+    let view_h = m.content_view_h();
+
+    let changed = State::with(|s| {
+        let Some(open) = s.detail.as_mut() else {
+            return false;
+        };
+        let max = (open.content_h - view_h).max(0.0);
+        let next = (open.scroll - delta * step).clamp(0.0, max);
+        if (next - open.scroll).abs() < 0.01 {
+            return false;
+        }
+        open.scroll = next;
+        true
+    });
+    if changed == Some(true) {
+        actions.push(Action::Redraw);
+    }
+}
+
+fn detail_key(hwnd: HWND, wp: WPARAM, actions: &mut Vec<Action>) {
+    let vk = wp.0 as u16;
+    if ctrl_down() && vk == VK_C.0 {
+        actions.push(Action::CopyDetail);
+        return;
+    }
+    if vk == VK_ESCAPE.0 {
+        actions.push(Action::CloseWindow);
+        return;
+    }
+
+    let m = detail_metrics(hwnd);
+    let row = m.row_h();
+    let page = (m.content_view_h() - row).max(row);
+    let delta = match vk {
+        v if v == VK_DOWN.0 => row,
+        v if v == VK_UP.0 => -row,
+        v if v == VK_NEXT.0 => page,
+        v if v == VK_PRIOR.0 => -page,
+        v if v == VK_HOME.0 => f32::MIN,
+        v if v == VK_END.0 => f32::MAX,
+        _ => return,
+    };
+    let view_h = m.content_view_h();
+
+    let changed = State::with(|s| {
+        let Some(open) = s.detail.as_mut() else {
+            return false;
+        };
+        let max = (open.content_h - view_h).max(0.0);
+        let next = (open.scroll + delta).clamp(0.0, max);
+        if (next - open.scroll).abs() < 0.01 {
+            return false;
+        }
+        open.scroll = next;
+        true
+    });
+    if changed == Some(true) {
+        actions.push(Action::Redraw);
+    }
+}
+
+fn paint_detail(hwnd: HWND) {
+    let popup = detail_metrics(hwnd);
+    let view_h = popup.content_view_h();
+    let mut content_h = 0.0f32;
+
+    unsafe {
+        let mut ps = PAINTSTRUCT::default();
+        let hdc = BeginPaint(hwnd, &mut ps);
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+
+        // Clamp with the height the previous frame measured, so a document that
+        // just got shorter cannot paint past its end while this frame renders.
+        State::with(|s| {
+            if let Some(open) = s.detail.as_mut() {
+                open.scroll = open.scroll.clamp(0.0, (open.content_h - view_h).max(0.0));
+            }
+        });
+
+        let mem = CreateCompatibleDC(Some(hdc));
+        let bitmap = CreateCompatibleBitmap(hdc, rc.right.max(1), rc.bottom.max(1));
+        let previous = SelectObject(mem, HGDIOBJ(bitmap.0));
+
+        let brush = CreateSolidBrush(COLORREF(theme::BG & 0x00FF_FFFF));
+        FillRect(mem, &rc, brush);
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+
+        if let Some(painter) = Painter::new(mem) {
+            content_h = State::with(|s| {
+                let Some(open) = s.detail.as_ref() else {
+                    return 0.0;
+                };
+                let view = detail::View {
+                    row: &open.row,
+                    doc: open.doc.as_ref(),
+                    error: open.error.as_deref(),
+                    depth: open.depth,
+                    scroll: open.scroll,
+                    hover: open.hover,
+                };
+                detail::draw(&painter, &s.fonts, &popup, &view)
+            })
+            .unwrap_or(0.0);
+        }
+
+        let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, Some(mem), 0, 0, SRCCOPY);
+        SelectObject(mem, previous);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(mem);
+        let _ = EndPaint(hwnd, &ps);
+    }
+
+    State::with(|s| {
+        if let Some(open) = s.detail.as_mut() {
+            open.content_h = content_h;
+        }
+    });
 }

@@ -57,6 +57,33 @@ pub fn local_clock(iso: Option<&str>) -> String {
     }
 }
 
+/// `YYYY-MM-DD HH:MM:SS` in local time. The detail popup shows an absolute
+/// stamp, where a bare clock reading would be ambiguous about the day.
+pub fn local_datetime(iso: Option<&str>) -> String {
+    let local = iso
+        .and_then(crate::time::parse_unix)
+        .and_then(crate::time::local_parts);
+    match local {
+        Some(p) => format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            p.year, p.month, p.day, p.hour, p.minute, p.second
+        ),
+        None => DASH.into(),
+    }
+}
+
+/// A coarse span, e.g. `45s` / `4m09s` / `1h02m`. Used for how long an upstream
+/// attempt took from start to the record being written.
+pub fn duration_span(seconds: i64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +124,13 @@ mod tests {
     fn missing_timestamp_is_a_dash() {
         assert_eq!(relative_time(None, BASE), DASH);
         assert_eq!(relative_time(Some("garbage"), BASE), DASH);
+        assert_eq!(local_datetime(None), DASH);
+    }
+
+    #[test]
+    fn spans_read_at_three_scales() {
+        assert_eq!(duration_span(45), "45s");
+        assert_eq!(duration_span(249), "4m09s");
+        assert_eq!(duration_span(3725), "1h02m");
     }
 }

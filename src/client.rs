@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::model::{Envelope, Request};
+use crate::model::{DetailData, Envelope, ExecutionDetail, Request};
 
 /// Mirrors the requests page field selection. `modelID` and `apiKey` must stay
 /// byte-exact: the leading-lowercase acronyms are not valid `camelCase`, so the
@@ -45,6 +45,39 @@ query GetRequests($first: Int, $where: RequestWhereInput, $orderBy: RequestOrder
       }
     }
     totalCount
+  }
+}
+"#;
+
+/// Mirrors the console's own request-detail query (`GetRequestExecutions`), so
+/// the field selection is known to validate against the server: `node(id:)`
+/// resolves the `Request` and its `executions` are the upstream attempts, one
+/// per retry. Newest first, matching the detail page.
+const REQUEST_EXECUTIONS_QUERY: &str = r#"
+query GetRequestExecutions($requestID: ID!, $first: Int, $orderBy: RequestExecutionOrder) {
+  node(id: $requestID) {
+    ... on Request {
+      executions(first: $first, orderBy: $orderBy) {
+        edges {
+          node {
+            createdAt
+            updatedAt
+            modelID
+            format
+            reasoningEffort
+            passThroughApplied
+            status
+            responseStatusCode
+            errorMessage
+            requestURL
+            metricsFirstTokenLatencyMs
+            metricsReasoningDurationMs
+            channel { name type baseURL }
+          }
+        }
+        totalCount
+      }
+    }
   }
 }
 "#;
@@ -178,13 +211,63 @@ impl Client {
             }
         });
 
+        let data: crate::model::RequestsData = self.graphql(url, token, project_id, &body)?;
+        let total = data.requests.total_count.unwrap_or(0);
+        Ok((
+            data.requests
+                .edges
+                .into_iter()
+                .filter_map(|e| e.node)
+                .collect(),
+            total,
+        ))
+    }
+
+    /// Every upstream attempt recorded for one request, newest first. This is
+    /// what the card's error popup shows; a request without executions (still
+    /// queued, or recorded before AxonHub stored them) yields an empty list.
+    pub fn fetch_request_executions(
+        &self,
+        url: &str,
+        token: &str,
+        project_id: &str,
+        request_id: &str,
+    ) -> Result<Vec<ExecutionDetail>, ApiError> {
+        let body = json!({
+            "query": REQUEST_EXECUTIONS_QUERY,
+            "operationName": "GetRequestExecutions",
+            "variables": {
+                "requestID": request_id,
+                "first": 20,
+                "orderBy": { "field": "CREATED_AT", "direction": "DESC" }
+            }
+        });
+
+        let data: DetailData = self.graphql(url, token, project_id, &body)?;
+        Ok(data
+            .node
+            .and_then(|n| n.executions)
+            .map(|c| c.edges.into_iter().filter_map(|e| e.node).collect())
+            .unwrap_or_default())
+    }
+
+    /// One authenticated GraphQL round trip, with the auth and error handling
+    /// every query shares: a 401 and a GraphQL "unauthorized" both mean the
+    /// token is gone, and anything else surfaces as a message.
+    fn graphql<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        token: &str,
+        project_id: &str,
+        body: &serde_json::Value,
+    ) -> Result<T, ApiError> {
         let response = self
             .agent
             .post(url)
             .header("Content-Type", "application/json")
             .header("Authorization", &format!("Bearer {token}"))
             .header("X-Project-ID", project_id)
-            .send_json(&body)
+            .send_json(body)
             .map_err(|e| map_transport(e, true))?;
 
         let status = response.status();
@@ -201,7 +284,7 @@ impl Client {
             return Err(ApiError::Rejected(message));
         }
 
-        let envelope: Envelope =
+        let envelope: Envelope<T> =
             serde_json::from_str(&text).map_err(|e| ApiError::Malformed(e.to_string()))?;
 
         if let Some(first) = envelope.errors.first() {
@@ -213,19 +296,9 @@ impl Client {
             return Err(ApiError::Rejected(first.message.clone()));
         }
 
-        let Some(data) = envelope.data else {
-            return Err(ApiError::Malformed("响应缺少 data 字段".into()));
-        };
-
-        let total = data.requests.total_count.unwrap_or(0);
-        Ok((
-            data.requests
-                .edges
-                .into_iter()
-                .filter_map(|e| e.node)
-                .collect(),
-            total,
-        ))
+        envelope
+            .data
+            .ok_or_else(|| ApiError::Malformed("响应缺少 data 字段".into()))
     }
 }
 
