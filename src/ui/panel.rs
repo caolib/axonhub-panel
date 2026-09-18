@@ -97,8 +97,14 @@ struct CardMetrics {
     radius: f32,
     accent_w: f32,
     accent_inset: f32,
-    /// The gap between the two text lines.
+    /// The gap between the two text lines (two-line layout only).
     gap: f32,
+    /// Horizontal padding inside the model chip.
+    chip_hpad: f32,
+    /// Vertical padding of the model chip around its text line.
+    chip_vpad: f32,
+    /// Single-line layout: one content line with the chip defining its height.
+    single: bool,
 }
 
 impl CardMetrics {
@@ -110,9 +116,24 @@ impl CardMetrics {
             line2: LINE2_H * s,
             radius: CARD_RADIUS * s,
             accent_w: ACCENT_W * s,
-            accent_inset: ACCENT_INSET * s,
+            // A single-line card gives the accent bar less inset, or the bar
+            // would be shorter than the text it flanks.
+            accent_inset: (if m.single_line { 4.0 } else { ACCENT_INSET }) * s,
             gap: 3.0 * s,
+            chip_hpad: 4.0 * s,
+            chip_vpad: 2.0 * s,
+            single: m.single_line,
         }
+    }
+
+    /// Total height of the model chip.
+    fn chip_h(&self) -> f32 {
+        self.line2 + self.chip_vpad * 2.0
+    }
+
+    /// The vertical band a card's content must fit into.
+    fn band_h(&self, card_h: f32) -> f32 {
+        card_h - self.accent_inset * 2.0
     }
 }
 
@@ -338,6 +359,48 @@ fn draw_rows(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     p.reset_clip();
 }
 
+/// Card background and the status accent bar, shared by both card layouts.
+fn draw_card_chrome(
+    p: &Painter,
+    row: &Row,
+    rect: Rect,
+    c: &CardMetrics,
+    m: Metrics,
+    highlighted: bool,
+) {
+    let fill = if highlighted {
+        theme::CARD_HOVER
+    } else {
+        theme::CARD
+    };
+    p.round_rect(rect.x, rect.y, rect.w, rect.h, c.radius, fill, true);
+
+    // Status is encoded by colour alone: this bar is the only state indicator,
+    // so it is wide enough to read at a glance and inset from the card edge.
+    p.round_rect(
+        rect.x + m.scale,
+        rect.y + c.accent_inset,
+        c.accent_w,
+        c.band_h(rect.h),
+        c.accent_w / 2.0,
+        theme::status_color(row.status),
+        true,
+    );
+}
+
+/// The served model with its reasoning effort, e.g. `glm-5.2(max)`. When the
+/// served model differs from the requested one, it is wrapped in 「」 instead of
+/// recoloured so the distinction is unambiguous.
+fn model_label(row: &Row) -> String {
+    let model = row.served_model();
+    match (&row.reasoning_effort, row.is_routed()) {
+        (Some(effort), true) => format!("「{}({})」", model, effort),
+        (Some(effort), false) => format!("{}({})", model, effort),
+        (None, true) => format!("「{}」", model),
+        (None, false) => model.to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_card(
     p: &Painter,
@@ -352,24 +415,12 @@ fn draw_card(
 ) {
     let c = CardMetrics::new(m);
     let highlighted = v.hover == Some(index) || v.selected == Some(index);
-    let fill = if highlighted {
-        theme::CARD_HOVER
-    } else {
-        theme::CARD
-    };
-    p.round_rect(rect.x, rect.y, rect.w, rect.h, c.radius, fill, true);
+    draw_card_chrome(p, row, rect, &c, m, highlighted);
 
-    // Status is encoded by colour alone: this bar is the only state indicator,
-    // so it is wide enough to read at a glance and inset from the card edge.
-    p.round_rect(
-        rect.x + m.scale,
-        rect.y + c.accent_inset,
-        c.accent_w,
-        rect.h - c.accent_inset * 2.0,
-        c.accent_w / 2.0,
-        theme::status_color(row.status),
-        true,
-    );
+    if c.single {
+        draw_card_single(p, fonts, row, rect, v, m, &c, ch_palette, mdl_palette);
+        return;
+    }
 
     let text_x = rect.x + c.inner_pad;
     let mut y = rect.y + c.accent_inset;
@@ -603,42 +654,20 @@ fn draw_card(
 
     // Model name with reasoning effort, e.g. "glm-5.2(max)". Drawn on a soft
     // chip so the served model stands apart from the surrounding metrics.
-    // When the served model differs from the request, wrap it in 「」 instead
-    // of recolouring so the distinction is unambiguous.
-    let model_label = row.served_model();
-    let routed = row.is_routed();
-    let display = match &row.reasoning_effort {
-        Some(effort) => {
-            if routed {
-                format!("「{}({})」", model_label, effort)
-            } else {
-                format!("{}({})", model_label, effort)
-            }
-        }
-        None => {
-            if routed {
-                format!("「{}」", model_label)
-            } else {
-                model_label.to_string()
-            }
-        }
-    };
+    let display = model_label(row);
     let model_color = mdl_palette
         .iter()
-        .find(|(n, _)| *n == model_label)
+        .find(|(n, _)| *n == row.served_model())
         .map(|(_, c)| *c)
         .unwrap_or(theme::TEXT);
-    let chip_hpad = 4.0 * m.scale;
-    let chip_vpad = 2.0 * m.scale;
     let chip_w =
-        (p.dual_measure(&fonts.small, &display) + chip_hpad * 2.0).min((right_edge - x).max(0.0));
-    let text_w = (chip_w - chip_hpad * 2.0).max(0.0);
-    let chip_h = c.line2 + chip_vpad * 2.0;
+        (p.dual_measure(&fonts.small, &display) + c.chip_hpad * 2.0).min((right_edge - x).max(0.0));
+    let text_w = (chip_w - c.chip_hpad * 2.0).max(0.0);
     p.round_rect(
         x,
-        y - chip_vpad,
+        y - c.chip_vpad,
         chip_w,
-        chip_h,
+        c.chip_h(),
         3.0 * m.scale,
         theme::BORDER,
         true,
@@ -646,7 +675,7 @@ fn draw_card(
     p.dual_text(
         &fonts.small,
         &display,
-        x + chip_hpad,
+        x + c.chip_hpad,
         y,
         text_w,
         c.line2,
@@ -665,6 +694,286 @@ fn draw_card(
                 &label,
                 x,
                 y,
+                w,
+                c.line2,
+                if row.cache_hit_is_low() {
+                    theme::RED
+                } else {
+                    theme::GREEN
+                },
+                theme::ALIGN_NEAR,
+            );
+        }
+    }
+}
+
+/// Compact card: every field on a single line, with the model chip as the only
+/// framed element.
+///
+/// The busiest cards cannot fit at panel width, so the right-hand cluster is
+/// placed first and the left-hand cells are drawn in priority order, each only
+/// if it still fits in what remains. A dropped cell is not an anomaly — it
+/// simply does not fit — which is why the panel degrades this way rather than
+/// shrinking the text.
+#[allow(clippy::too_many_arguments)]
+fn draw_card_single(
+    p: &Painter,
+    fonts: &theme::Fonts,
+    row: &Row,
+    rect: Rect,
+    v: &ListView,
+    m: Metrics,
+    c: &CardMetrics,
+    ch_palette: &[(&str, u32)],
+    mdl_palette: &[(&str, u32)],
+) {
+    let s = m.scale;
+    let gap = 4.0 * s;
+    // The chip defines the content band; every text line is centred against it.
+    let chip_h = c.chip_h();
+    let chip_y = rect.y + (rect.h - chip_h) / 2.0;
+    let small_y = chip_y + c.chip_vpad;
+    let body_y = rect.y + (rect.h - c.line1) / 2.0;
+
+    // --- Right cluster: time, source badge, TPS, retry. Placed first so the
+    // left cluster knows exactly how much room it has.
+    let mut right = rect.x + rect.w - c.inner_pad;
+
+    let time_text = fmt::relative_time(row.created_at.as_deref(), v.now);
+    let time_w = p.dual_measure(&fonts.body, &time_text) + 4.0;
+    let time_x = right - time_w;
+    p.dual_text(
+        &fonts.body,
+        &time_text,
+        time_x,
+        body_y,
+        time_w,
+        c.line1,
+        theme::TEXT_FAINT,
+        theme::ALIGN_FAR,
+    );
+    right = time_x - 6.0 * s;
+
+    let badge = row.source.badge();
+    let badge_w = p.dual_measure(&fonts.small, badge);
+    p.dual_text(
+        &fonts.small,
+        badge,
+        right - badge_w,
+        small_y,
+        badge_w,
+        c.line2,
+        match row.source {
+            Source::AxonHub => theme::ORANGE,
+            Source::Octopus => theme::BLUE,
+        },
+        theme::ALIGN_NEAR,
+    );
+    right -= badge_w + 8.0 * s;
+
+    if let Some(tps) = row.tps() {
+        let label = format!("{tps:.0} tok/s");
+        let w = p.dual_measure(&fonts.small, &label);
+        p.dual_text(
+            &fonts.small,
+            &label,
+            right - w - 2.0 * s,
+            small_y,
+            w + 4.0 * s,
+            c.line2,
+            theme::TEXT_DIM,
+            theme::ALIGN_FAR,
+        );
+        right -= w + 10.0 * s;
+    }
+
+    if row.attempt_count > 1 {
+        let label = format!("{}×", row.attempt_count - 1);
+        let w = p.dual_measure(&fonts.small, &label) + 6.0;
+        p.dual_text(
+            &fonts.small,
+            &label,
+            right - w,
+            small_y,
+            w,
+            c.line2,
+            theme::RED,
+            theme::ALIGN_FAR,
+        );
+        right -= w + 10.0 * s;
+    }
+
+    // Every left-hand cell must stop short of the right cluster.
+    let limit = right - 4.0 * s;
+
+    // --- Left cluster: model chip first. It is the row's identity, so it is
+    // always drawn, compressed to whatever room is left if need be.
+    let mut x = rect.x + c.inner_pad;
+    let display = model_label(row);
+    let model_color = mdl_palette
+        .iter()
+        .find(|(n, _)| *n == row.served_model())
+        .map(|(_, c)| *c)
+        .unwrap_or(theme::TEXT);
+    let chip_w =
+        (p.dual_measure(&fonts.small, &display) + c.chip_hpad * 2.0).min((limit - x).max(0.0));
+    p.round_rect(x, chip_y, chip_w, chip_h, 3.0 * s, theme::BORDER, true);
+    p.dual_text(
+        &fonts.small,
+        &display,
+        x + c.chip_hpad,
+        small_y,
+        (chip_w - c.chip_hpad * 2.0).max(0.0),
+        c.line2,
+        model_color,
+        theme::ALIGN_NEAR,
+    );
+    x += chip_w + gap;
+
+    // Status marks. 流 is AxonHub-only: Octopus's overview does not report
+    // whether the client streamed, and a faint mark would wrongly read as "no".
+    // They are drawn as a group — showing 透 without 转 would misrepresent the
+    // row, so either all that apply fit or none are drawn.
+    let mut marks: Vec<(&str, u32)> = Vec::with_capacity(3);
+    if row.source == Source::AxonHub {
+        marks.push((
+            "流",
+            if row.stream {
+                theme::WHITE
+            } else {
+                theme::TEXT_FAINT
+            },
+        ));
+    }
+    marks.push((
+        "转",
+        if row.protocol().is_converted() {
+            theme::YELLOW
+        } else {
+            theme::GREEN
+        },
+    ));
+    marks.push((
+        "透",
+        if row.pass_through {
+            theme::GREEN
+        } else {
+            theme::GRAY
+        },
+    ));
+    let mark_gap = 1.0 * s;
+    let marks_w: f32 = marks
+        .iter()
+        .map(|(mark, _)| p.dual_measure(&fonts.body, mark) + mark_gap)
+        .sum::<f32>()
+        - mark_gap;
+    if x + marks_w <= limit {
+        for (mark, color) in &marks {
+            let w = p.dual_measure(&fonts.body, mark);
+            p.dual_text(
+                &fonts.body,
+                mark,
+                x,
+                body_y,
+                w,
+                c.line1,
+                *color,
+                theme::ALIGN_NEAR,
+            );
+            x += w + mark_gap;
+        }
+        x += gap - mark_gap;
+    }
+
+    // Protocol name (chat/responses/messages): the interface type the client
+    // spoke, kept beside the conversion mark that refers to it.
+    if let Some(name) = &row.format {
+        let w = p.dual_measure(&fonts.small, name);
+        if x + w < limit {
+            p.dual_text(
+                &fonts.small,
+                name,
+                x,
+                small_y,
+                w + 2.0 * s,
+                c.line2,
+                theme::TEXT_DIM,
+                theme::ALIGN_NEAR,
+            );
+            x += w + gap;
+        }
+    }
+
+    // Caller (API key name).
+    if let Some(caller) = &row.caller {
+        let w = p.dual_measure(&fonts.small, caller);
+        if x + w < limit {
+            p.dual_text(
+                &fonts.small,
+                caller,
+                x,
+                small_y,
+                w + 2.0 * s,
+                c.line2,
+                theme::TEXT_FAINT,
+                theme::ALIGN_NEAR,
+            );
+            x += w + gap;
+        }
+    }
+
+    // Channel.
+    if let Some(channel) = &row.channel {
+        let color = ch_palette
+            .iter()
+            .find(|(n, _)| *n == channel.as_str())
+            .map(|(_, c)| *c)
+            .unwrap_or(theme::CYAN);
+        let w = p.dual_measure(&fonts.small, channel);
+        if x + w < limit {
+            p.dual_text(
+                &fonts.small,
+                channel,
+                x,
+                small_y,
+                w + 2.0 * s,
+                c.line2,
+                color,
+                theme::ALIGN_NEAR,
+            );
+            x += w + gap;
+        }
+    }
+
+    // Tokens.
+    if row.total_tokens > 0 {
+        let tokens = fmt::tokens_compact(row.total_tokens);
+        let w = p.dual_measure(&fonts.small, &tokens);
+        if x + w < limit {
+            p.dual_text(
+                &fonts.small,
+                &tokens,
+                x,
+                small_y,
+                w,
+                c.line2,
+                theme::TEXT_DIM,
+                theme::ALIGN_NEAR,
+            );
+            x += w + gap;
+        }
+    }
+
+    // Cache hit rate.
+    if let Some(rate) = row.cache_hit_rate() {
+        let label = format!("{rate:.2}%");
+        let w = p.dual_measure(&fonts.small, &label);
+        if x + w < limit {
+            p.dual_text(
+                &fonts.small,
+                &label,
+                x,
+                small_y,
                 w,
                 c.line2,
                 if row.cache_hit_is_low() {
@@ -742,6 +1051,30 @@ mod tests {
             user: None,
             pinned,
             filter: model::FILTER_NONE,
+        }
+    }
+
+    #[test]
+    fn both_layouts_fit_their_card_height() {
+        for single in [false, true] {
+            let m = Metrics::new(452.0, 300.0, 1.0).with_single_line(single);
+            let c = CardMetrics::new(m);
+            assert_eq!(c.single, single);
+            let band = c.band_h(m.card_h);
+            let content = if single {
+                // One line: the chip is the tallest element.
+                c.chip_h()
+            } else {
+                c.line1 + c.gap + c.line2
+            };
+            assert!(
+                content <= band + 0.01,
+                "single {single}: content {content} overflows the {band}px band"
+            );
+            assert!(
+                c.line1 <= band + 0.01,
+                "single {single}: the body line does not fit the band"
+            );
         }
     }
 

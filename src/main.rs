@@ -211,7 +211,8 @@ fn sync_scale(hwnd: HWND) {
     // Whole cards only: derive the height from the row count so no partial
     // card is left over, and keep the panel inside this monitor's work area.
     let work = work_area_for(hwnd);
-    let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale).min(work.3 - work.1);
+    let single = single_line_mode();
+    let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale, single).min(work.3 - work.1);
     if fitted > 0 {
         height = fitted;
     }
@@ -224,6 +225,7 @@ fn sync_scale(hwnd: HWND) {
         },
         work,
         scale,
+        single,
     );
     unsafe {
         let _ = SetWindowPos(
@@ -246,6 +248,13 @@ fn config_rows(hwnd: HWND) -> usize {
     State::with(|s| s.app.config.row_limit.max(1) as usize).unwrap_or(12)
 }
 
+/// Whether cards are drawn as one line instead of two. Read on its own rather
+/// than inside another `State::with`: `window_scale` already borrows the state,
+/// and nesting the borrow would panic.
+fn single_line_mode() -> bool {
+    State::with(|s| s.app.config.single_line).unwrap_or(false)
+}
+
 /// Rows that fit in the window at its current size.
 fn current_visible_rows(hwnd: HWND) -> usize {
     let mut rc = RECT::default();
@@ -253,7 +262,7 @@ fn current_visible_rows(hwnd: HWND) -> usize {
         let _ = GetClientRect(hwnd, &mut rc);
     }
     let height = (rc.bottom - rc.top) as f32;
-    ui::layout::rows_in_height(height, window_scale(hwnd))
+    ui::layout::rows_in_height(height, window_scale(hwnd), single_line_mode())
 }
 
 /// Context-menu command ids.
@@ -270,6 +279,8 @@ const MENU_ROWS_10: usize = 1401;
 const MENU_ROWS_15: usize = 1402;
 const MENU_ROWS_20: usize = 1403;
 const MENU_QUIT: usize = 1300;
+/// Toggle the one-line card layout.
+const MENU_SINGLE_LINE: usize = 1204;
 /// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` = 24 px.
 const MENU_FONT_BASE: usize = 1500;
 const MENU_FONT_MAX: usize = MENU_FONT_BASE + 14;
@@ -415,6 +426,7 @@ fn metrics_for(hwnd: HWND) -> Metrics {
         (rc.bottom - rc.top) as f32,
         window_scale(hwnd),
     )
+    .with_single_line(single_line_mode())
 }
 
 /// Windows' per-monitor DPI setting as a scale over the 96-DPI baseline GDI+
@@ -690,8 +702,12 @@ fn main() {
         };
         let work = work_area_for(hwnd);
         let width = ui::layout::device_px(logical_width, scale);
-        let height = ui::layout::height_for_rows(config.row_limit.max(1) as usize, scale)
-            .min(work.3 - work.1);
+        let height = ui::layout::height_for_rows(
+            config.row_limit.max(1) as usize,
+            scale,
+            config.single_line,
+        )
+        .min(work.3 - work.1);
         let (x, y) = if saved.x < 0 && saved.y < 0 {
             // First run: pin to the top-right of the primary work area now that
             // the real width is known.
@@ -708,6 +724,7 @@ fn main() {
             },
             work,
             scale,
+            config.single_line,
         );
         let _ = SetWindowPos(
             hwnd,
@@ -844,7 +861,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 (rc.right - rc.left) as f32,
                 (rc.bottom - rc.top) as f32,
                 window_scale(hwnd),
-            );
+            )
+            .with_single_line(single_line_mode());
 
             return LRESULT(hit_test(m, x, y));
         }
@@ -859,7 +877,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 (rc.right - rc.left) as f32,
                 (rc.bottom - rc.top) as f32,
                 window_scale(hwnd),
-            );
+            )
+            .with_single_line(single_line_mode());
             let local_x = (cursor.x - rc.left) as f32;
             let local_y = (cursor.y - rc.top) as f32;
             let pinned = State::with(|s| s.app.config.pin_position).unwrap_or(false);
@@ -879,12 +898,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_GETMINMAXINFO => {
             // Keep the panel usable: wide enough for the metric row, tall enough
-            // for the header and a couple of cards, in device pixels.
+            // for the header and a couple of cards, in device pixels. The floor
+            // is lower in single-line mode, where the five-row preset is only
+            // ~176 logical pixels tall.
             let scale = window_scale(hwnd);
+            let min_h = if single_line_mode() { 110.0 } else { 200.0 };
             let info = unsafe { &mut *(lp.0 as *mut MINMAXINFO) };
             info.ptMinTrackSize = POINT {
                 x: (320.0 * scale) as i32,
-                y: (200.0 * scale) as i32,
+                y: (min_h * scale) as i32,
             };
             return LRESULT(0);
         }
@@ -969,7 +991,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             // Whole cards only: derive the height from the row count instead of
             // trusting the scaled pixel value, so no partial card is left over.
             let work = work_area_at(x, y);
-            let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale).min(work.3 - work.1);
+            let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale, single_line_mode())
+                .min(work.3 - work.1);
             if fitted > 0 {
                 height = fitted;
             }
@@ -1036,6 +1059,9 @@ enum Action {
     /// Change the body font size from the menu and refit the window; the whole
     /// panel scales with it.
     SetFontSize(f32),
+    /// Switch between the two-line and single-line card layouts. The row count
+    /// is kept and the window height refitted to match.
+    SetSingleLine(bool),
     /// Toggle `WS_EX_NOACTIVATE` so the window can (or cannot) take focus.
     SetActivatable(bool),
     ClearCredentials,
@@ -1119,7 +1145,8 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 });
                 let scale = window_scale(hwnd);
                 let work = work_area_for(hwnd);
-                let height = ui::layout::height_for_rows(rows, scale).min(work.3 - work.1);
+                let height = ui::layout::height_for_rows(rows, scale, single_line_mode())
+                    .min(work.3 - work.1);
                 let mut rc = RECT::default();
                 unsafe {
                     let _ = GetWindowRect(hwnd, &mut rc);
@@ -1149,6 +1176,44 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 // reloads fonts, resizes, clamps scroll and invalidates.
                 sync_scale(hwnd);
                 save_window_state(hwnd);
+            }
+            Action::SetSingleLine(on) => {
+                State::with(|s| s.app.config.single_line = on);
+                // Same row count, shorter cards: refit the window to whole
+                // cards of the new height, keeping it on screen.
+                let scale = window_scale(hwnd);
+                let work = work_area_for(hwnd);
+                let height =
+                    ui::layout::height_for_rows(config_rows(hwnd), scale, on).min(work.3 - work.1);
+                let mut rc = RECT::default();
+                unsafe {
+                    let _ = GetWindowRect(hwnd, &mut rc);
+                }
+                let placed = config::clamp_to_virtual_screen(
+                    WindowState {
+                        x: rc.left,
+                        y: rc.top,
+                        width: rc.right - rc.left,
+                        height,
+                    },
+                    work,
+                    scale,
+                    on,
+                );
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        placed.x,
+                        placed.y,
+                        placed.width,
+                        placed.height,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+                clamp_scroll(hwnd);
+                save_window_state(hwnd);
+                invalidate(hwnd);
             }
             Action::Paste => {
                 if let Some(text) = clipboard_text() {
@@ -1275,7 +1340,8 @@ fn paint(hwnd: HWND) {
             (rc.right - rc.left) as f32,
             (rc.bottom - rc.top) as f32,
             window_scale(hwnd),
-        );
+        )
+        .with_single_line(single_line_mode());
 
         // Draw the whole frame into an off-screen bitmap and present it with one
         // BitBlt. Painting the window DC directly lets each invalidate show a
@@ -1733,6 +1799,10 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
         MENU_PIN_POSITION => {
             s.app.config.pin_position = !s.app.config.pin_position;
         }
+        MENU_SINGLE_LINE => {
+            let on = !s.app.config.single_line;
+            actions.push(Action::SetSingleLine(on));
+        }
         MENU_OPEN => {
             let url = format!(
                 "{}/project/requests",
@@ -1851,6 +1921,10 @@ fn show_menu(hwnd: HWND) {
                 PCWSTR(sub_label.as_mut_ptr()),
             );
         }
+        // One-line card layout: same row count, shorter cards, shorter panel.
+        let single = State::with(|s| s.app.config.single_line).unwrap_or(false);
+        add("单行模式", MENU_SINGLE_LINE, single, true);
+
         add("刷新", MENU_REFRESH, false, true);
         add("打开请求页", MENU_OPEN, false, true);
 

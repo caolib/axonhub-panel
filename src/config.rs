@@ -74,6 +74,10 @@ pub struct Config {
     /// reads. Adjustable from the right-click menu (10–24) and clamped to that
     /// range on load.
     pub font_size: f32,
+    /// Draw every card as a single line instead of two, halving the card
+    /// height. Toggled from the right-click menu; the window is resized to keep
+    /// the same row count, so the panel gets shorter rather than denser.
+    pub single_line: bool,
     pub window: WindowState,
 }
 
@@ -98,7 +102,7 @@ impl Default for WindowState {
             x: -1,
             y: -1,
             width: 452,
-            height: crate::ui::layout::height_for_rows(DEFAULT_ROWS, 1.0),
+            height: crate::ui::layout::height_for_rows(DEFAULT_ROWS, 1.0, false),
         }
     }
 }
@@ -116,6 +120,7 @@ impl Default for Config {
             octopus_endpoint: "http://localhost:8091".into(),
             octopus_token_env_var: "OCTOPUS_AUTH_TOKEN".into(),
             font_size: 12.5,
+            single_line: false,
             always_on_top: true,
             pin_position: false,
             always_on_bottom: false,
@@ -306,14 +311,19 @@ fn clear_stored_in(dir: &Path) {
 /// Bring the window back on screen if a display change orphaned it, shrinking it
 /// to fit the work area when the display got smaller. `state.width`/`height` are
 /// device pixels; the minimums stay usable by scaling the logical floor.
+///
+/// The floor is lower in single-line mode: there the five-row preset is only
+/// ~176 logical pixels tall, so a 200-pixel minimum would stretch the window
+/// back out on the next resize or launch.
 pub fn clamp_to_virtual_screen(
     state: WindowState,
     screen: (i32, i32, i32, i32),
     scale: f32,
+    single_line: bool,
 ) -> WindowState {
     let (left, top, right, bottom) = screen;
     let min_w = crate::ui::layout::device_px(320, scale);
-    let min_h = crate::ui::layout::device_px(200, scale);
+    let min_h = crate::ui::layout::device_px(if single_line { 110 } else { 200 }, scale);
     let width = state.width.clamp(min_w, (right - left).max(min_w));
     let height = state.height.clamp(min_h, (bottom - top).max(min_h));
     let x = state.x.clamp(left - 8, (right - width).max(left));
@@ -514,11 +524,21 @@ mod tests {
         config.endpoint = "http://example:1234".into();
         config.row_limit = 7;
         config.credential_mode = CredentialMode::Password;
+        config.single_line = true;
 
         let json = serde_json::to_string(&config).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(back.endpoint, "http://example:1234");
         assert_eq!(back.row_limit, 7);
         assert_eq!(back.credential_mode, CredentialMode::Password);
+        assert!(back.single_line);
+    }
+
+    #[test]
+    fn a_config_without_single_line_keeps_two_line_cards() {
+        // A file written before the mode existed must not silently switch the
+        // panel to the compact layout.
+        let back: Config = serde_json::from_str("{}").unwrap();
+        assert!(!back.single_line);
     }
 }

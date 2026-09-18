@@ -133,9 +133,15 @@ fn make_font(fam: *mut GpFontFamily, size: f32, bold: bool) -> *mut GpFont {
 
 impl Fonts {
     pub fn load(scale: f32) -> Self {
-        // Single font family for both Latin and CJK — Maple Mono NF CN
-        // supports both, so run splitting uses the same metrics everywhere.
-        let family = pick(&["Maple Mono NF CN", "Microsoft YaHei UI", "Segoe UI"]);
+        // Single font family for both Latin and CJK — JetBrainsLxgwNerdMono
+        // covers both with 2:1 metrics, so run splitting uses the same metrics
+        // everywhere.
+        let family = pick(&[
+            "JetBrainsLxgwNerdMono",
+            "Maple Mono NF CN",
+            "Microsoft YaHei UI",
+            "Segoe UI",
+        ]);
         let latin_family = family;
         let cjk_family = family;
 

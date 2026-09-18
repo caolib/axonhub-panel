@@ -9,6 +9,9 @@
 
 pub const PAD: f32 = 8.0;
 pub const CARD_H: f32 = 44.0;
+/// Card height in the single-line layout: one body line with the model chip
+/// centred in it.
+pub const CARD_H_SINGLE: f32 = 26.0;
 pub const CARD_GAP: f32 = 4.0;
 pub const HEADER_H: f32 = 30.0;
 
@@ -32,6 +35,8 @@ pub struct Metrics {
     pub height: f32,
     /// Device-pixel scale of the monitor the window is on (1.0 at 96 DPI).
     pub scale: f32,
+    /// Whether cards are drawn as one line (the compact layout) instead of two.
+    pub single_line: bool,
     pub header_h: f32,
     pub card_h: f32,
     pub card_gap: f32,
@@ -39,17 +44,27 @@ pub struct Metrics {
 
 impl Metrics {
     /// Build metrics for a client area of `width` x `height` device pixels on a
-    /// monitor scaled by `scale`.
+    /// monitor scaled by `scale`, in the default two-line layout.
     pub fn new(width: f32, height: f32, scale: f32) -> Self {
         let s = scale.max(0.5);
         Metrics {
             width,
             height,
             scale: s,
+            single_line: false,
             header_h: HEADER_H * s,
             card_h: CARD_H * s,
             card_gap: CARD_GAP * s,
         }
+    }
+
+    /// Adopt the single-line card height. Everything derived from `card_h` —
+    /// the pitch, card rectangles, hit areas and scroll range — follows, so the
+    /// caller only has to swap the layout flag.
+    pub fn with_single_line(mut self, on: bool) -> Self {
+        self.single_line = on;
+        self.card_h = (if on { CARD_H_SINGLE } else { CARD_H }) * self.scale;
+        self
     }
 
     pub fn pad(&self) -> f32 {
@@ -135,8 +150,8 @@ impl Metrics {
 }
 
 /// How many whole request cards fit at `scale`.
-pub fn rows_in_height(height: f32, scale: f32) -> usize {
-    let m = Metrics::new(0.0, height, scale);
+pub fn rows_in_height(height: f32, scale: f32, single_line: bool) -> usize {
+    let m = Metrics::new(0.0, height, scale).with_single_line(single_line);
     let viewport = m.rows_viewport_h();
     if viewport <= 0.0 {
         return 1;
@@ -147,8 +162,8 @@ pub fn rows_in_height(height: f32, scale: f32) -> usize {
 /// Window height that shows exactly `rows` cards with no partial card left over,
 /// at `scale`. Callers clamp the result to the monitor work area: a tall panel
 /// on a short screen is expected to scroll rather than overflow.
-pub fn height_for_rows(rows: usize, scale: f32) -> i32 {
-    let m = Metrics::new(0.0, 0.0, scale);
+pub fn height_for_rows(rows: usize, scale: f32, single_line: bool) -> i32 {
+    let m = Metrics::new(0.0, 0.0, scale).with_single_line(single_line);
     let rows = rows.max(1);
     (m.header_h + rows as f32 * m.pitch() - m.card_gap).ceil() as i32
 }
@@ -213,16 +228,38 @@ mod tests {
 
     #[test]
     fn height_for_rows_round_trips_at_each_scale() {
-        for scale in [1.0, 1.25, 1.5, 2.0] {
-            for rows in [1usize, 5, 12, 30] {
-                let h = height_for_rows(rows, scale) as f32;
-                assert_eq!(
-                    rows_in_height(h, scale),
-                    rows,
-                    "scale {scale} rows {rows}: height {h} reported a different count"
-                );
+        for single_line in [false, true] {
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                for rows in [1usize, 5, 12, 30] {
+                    let h = height_for_rows(rows, scale, single_line) as f32;
+                    assert_eq!(
+                        rows_in_height(h, scale, single_line),
+                        rows,
+                        "single {single_line} scale {scale} rows {rows}: height {h} reported a different count"
+                    );
+                }
             }
         }
+    }
+
+    #[test]
+    fn single_line_cards_are_shorter_but_still_tile() {
+        let wide = Metrics::new(400.0, 400.0, 1.5);
+        let compact = Metrics::new(400.0, 400.0, 1.5).with_single_line(true);
+        assert_eq!(compact.card_h, CARD_H_SINGLE * 1.5);
+        assert_eq!(compact.pitch(), (CARD_H_SINGLE + CARD_GAP) * 1.5);
+
+        let a = compact.card_rect(0, 0.0);
+        let b = compact.card_rect(1, 0.0);
+        assert_eq!(b.y, a.y + compact.pitch());
+        assert!(b.y >= a.y + a.h);
+
+        // The compact card is shorter than the two-line one and the same
+        // window height holds more of them...
+        assert!(compact.card_h < wide.card_h);
+        assert!(rows_in_height(400.0, 1.5, true) > rows_in_height(400.0, 1.5, false));
+        // ...and flipping the flag back restores the authored height.
+        assert_eq!(compact.with_single_line(false).card_h, wide.card_h);
     }
 
     #[test]
