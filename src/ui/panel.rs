@@ -757,29 +757,11 @@ fn draw_card_single(
     // Every left-hand cell must stop short of the right cluster.
     let limit = right - 4.0 * s;
 
-    // --- Left cluster: model chip first. It is the row's identity, so it is
-    // always drawn, compressed to whatever room is left if need be.
+    // --- Left cluster. The status marks (流/转/透) and interface type are
+    // drawn first, at a fixed offset from the card edge, so they never jitter
+    // as the variable-width model name changes between rows. The model chip —
+    // the row's identity — always follows, filling whatever room remains.
     let mut x = rect.x + c.inner_pad;
-    let display = row.display_model();
-    let model_color = mdl_palette
-        .iter()
-        .find(|(n, _)| *n == row.served_model())
-        .map(|(_, c)| *c)
-        .unwrap_or(theme::TEXT);
-    let chip_w =
-        (p.dual_measure(&fonts.small, &display) + c.chip_hpad * 2.0).min((limit - x).max(0.0));
-    p.round_rect(x, chip_y, chip_w, chip_h, 3.0 * s, theme::BORDER, true);
-    p.dual_text(
-        &fonts.small,
-        &display,
-        x + c.chip_hpad,
-        small_y,
-        (chip_w - c.chip_hpad * 2.0).max(0.0),
-        c.line2,
-        model_color,
-        theme::ALIGN_NEAR,
-    );
-    x += chip_w + gap;
 
     // Status marks, drawn as a group — showing 透 without 转 would
     // misrepresent the row, so either all three fit or none are drawn.
@@ -833,8 +815,9 @@ fn draw_card_single(
         x += gap - mark_gap;
     }
 
-    // Protocol name (chat/responses/messages): the interface type the client
-    // spoke, kept beside the conversion mark that refers to it.
+    // Interface type (chat/responses/messages): the protocol the client spoke.
+    // Placed right after the marks, before the model name, so its position is
+    // also fixed rather than trailing a variable-width chip.
     if let Some(name) = &row.format {
         let w = p.dual_measure(&fonts.small, name);
         if x + w < limit {
@@ -852,25 +835,8 @@ fn draw_card_single(
         }
     }
 
-    // Caller (API key name).
-    if let Some(caller) = &row.caller {
-        let w = p.dual_measure(&fonts.small, caller);
-        if x + w < limit {
-            p.dual_text(
-                &fonts.small,
-                caller,
-                x,
-                small_y,
-                w + 2.0 * s,
-                c.line2,
-                theme::TEXT_FAINT,
-                theme::ALIGN_NEAR,
-            );
-            x += w + gap;
-        }
-    }
-
-    // Channel.
+    // Channel: drawn before the model name so its position is fixed too, right
+    // after the interface type, rather than trailing the variable-width chip.
     if let Some(channel) = &row.channel {
         let color = ch_palette
             .iter()
@@ -887,6 +853,47 @@ fn draw_card_single(
                 w + 2.0 * s,
                 c.line2,
                 color,
+                theme::ALIGN_NEAR,
+            );
+            x += w + gap;
+        }
+    }
+
+    // Model chip last: it is the row's identity, always drawn and compressed
+    // to whatever room the fixed-width prefix above leaves for it.
+    let display = row.display_model();
+    let model_color = mdl_palette
+        .iter()
+        .find(|(n, _)| *n == row.served_model())
+        .map(|(_, c)| *c)
+        .unwrap_or(theme::TEXT);
+    let chip_w =
+        (p.dual_measure(&fonts.small, &display) + c.chip_hpad * 2.0).min((limit - x).max(0.0));
+    p.round_rect(x, chip_y, chip_w, chip_h, 3.0 * s, theme::BORDER, true);
+    p.dual_text(
+        &fonts.small,
+        &display,
+        x + c.chip_hpad,
+        small_y,
+        (chip_w - c.chip_hpad * 2.0).max(0.0),
+        c.line2,
+        model_color,
+        theme::ALIGN_NEAR,
+    );
+    x += chip_w + gap;
+
+    // Caller (API key name).
+    if let Some(caller) = &row.caller {
+        let w = p.dual_measure(&fonts.small, caller);
+        if x + w < limit {
+            p.dual_text(
+                &fonts.small,
+                caller,
+                x,
+                small_y,
+                w + 2.0 * s,
+                c.line2,
+                theme::TEXT_FAINT,
                 theme::ALIGN_NEAR,
             );
             x += w + gap;
