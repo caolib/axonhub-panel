@@ -9,6 +9,7 @@ use windows::Win32::Graphics::GdiPlus::*;
 pub use windows::Win32::Graphics::GdiPlus::{
     GpBrush, GpFont, GpFontFamily, GpGraphics, GpPath, GpPen, GpSolidFill, GpStringFormat, RectF,
 };
+use std::marker::PhantomData;
 use windows::core::PCWSTR;
 
 // --- palette (dark theme, aligned with the AxonHub console) ---
@@ -91,10 +92,12 @@ pub struct Fonts {
     pub bold: DualFont,
     latin_family: *mut GpFontFamily,
     cjk_family: *mut GpFontFamily,
+    /// Makes `Fonts` `!Send` and `!Sync`. GDI+ objects are not thread-safe, so
+    /// they must only ever be touched from the UI thread; encoding that in the
+    /// type lets the compiler reject any accidental move across threads rather
+    /// than relying on a convention (previously a bare `unsafe impl Send`).
+    _ui_thread: PhantomData<std::rc::Rc<()>>,
 }
-
-// GDI+ objects are only ever touched from the UI thread.
-unsafe impl Send for Fonts {}
 
 /// First family in `names` that the system can resolve, or null if none can.
 fn pick(names: &[&str]) -> *mut GpFontFamily {
@@ -157,6 +160,7 @@ impl Fonts {
             bold: dual(12.5, true),
             latin_family,
             cjk_family,
+            _ui_thread: PhantomData,
         }
     }
 }

@@ -1100,6 +1100,7 @@ mod tests {
             cached_tokens: 0,
             attempt_count: 0,
             failed_attempts: 0,
+            attempts_truncated: false,
         }
     }
 

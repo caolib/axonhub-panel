@@ -886,6 +886,7 @@ mod tests {
             cached_tokens: 0,
             attempt_count: 2,
             failed_attempts: 1,
+            attempts_truncated: false,
         }
     }
 

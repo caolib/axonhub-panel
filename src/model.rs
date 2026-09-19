@@ -244,6 +244,11 @@ pub struct Row {
     /// well can still carry failures here, which is what makes its detail worth
     /// opening.
     pub failed_attempts: i64,
+    /// Whether `failed_attempts` may be incomplete: the list query caps
+    /// `executions` at the first 10, so a request with more attempts than that
+    /// could hide failures beyond what we fetched. When true, `is_error()` is
+    /// conservatively true so the card still opens the detail popup.
+    pub attempts_truncated: bool,
 }
 
 impl Row {
@@ -318,6 +323,16 @@ impl Row {
                         .count() as i64
                 })
                 .unwrap_or(0),
+            // `attempt_count` is the connection's true total, while the edges we
+            // inspect are capped at the first 10. If the total exceeds what we
+            // actually received, some attempts (and their failures) are unseen.
+            attempts_truncated: req
+                .executions
+                .as_ref()
+                .map(|c| {
+                    c.total_count.unwrap_or(0) > c.edges.len() as i64
+                })
+                .unwrap_or(false),
         }
     }
 
@@ -373,7 +388,12 @@ impl Row {
     /// after an attempt failed. Walking the retries is the point of the popup,
     /// so a request that recovered is as interesting as one that did not.
     pub fn is_error(&self) -> bool {
-        matches!(self.status, Status::Failed | Status::Canceled) || self.failed_attempts > 0
+        matches!(self.status, Status::Failed | Status::Canceled)
+            || self.failed_attempts > 0
+            // Failures may sit beyond the first 10 attempts we fetched, so when
+            // the attempt count is truncated we cannot prove the detail is empty
+            // — open it rather than risk hiding a retry.
+            || self.attempts_truncated
     }
 
     /// The served model with its reasoning effort, e.g. `glm-5.2(max)`. When the
@@ -489,6 +509,7 @@ mod tests {
             cached_tokens: 0,
             attempt_count: 0,
             failed_attempts: 0,
+            attempts_truncated: false,
         }
     }
 
@@ -601,6 +622,36 @@ mod tests {
         let row = Row::from_wire(&req);
         assert_eq!(row.failed_attempts, 0);
         assert!(!row.is_error());
+    }
+
+    #[test]
+    fn a_request_with_more_attempts_than_fetched_stays_clickable() {
+        // `GetRequests` returns at most 10 executions, so a request with more
+        // attempts than that could hide failures we never received. Even though
+        // the fetched slice shows no failures, the card must still open.
+        let req = wire_request(
+            r#"{
+              "id": "gid://axonhub/Request/4",
+              "status": "completed",
+              "modelID": "glm-5.2",
+              "executions": { "totalCount": 12, "edges": [
+                { "node": { "status": "completed", "modelID": "glm-5.2" } },
+                { "node": { "status": "completed", "modelID": "glm-5.2" } },
+                { "node": { "status": "completed", "modelID": "glm-5.2" } },
+                { "node": { "status": "completed", "modelID": "glm-5.2" } },
+                { "node": { "status": "completed", "modelID": "glm-5.2" } },
+                { "node": { "status": "completed", "modelID": "glm-5.2" } },
+                { "node": { "status": "completed", "modelID": "glm-5.2" } },
+                { "node": { "status": "completed", "modelID": "glm-5.2" } },
+                { "node": { "status": "completed", "modelID": "glm-5.2" } },
+                { "node": { "status": "completed", "modelID": "glm-5.2" } }
+              ] }
+            }"#,
+        );
+        let row = Row::from_wire(&req);
+        assert_eq!(row.attempt_count, 12);
+        assert!(row.attempts_truncated, "12 attempts vs 10 fetched must be flagged");
+        assert!(row.is_error(), "truncated attempts must stay clickable");
     }
 }
 

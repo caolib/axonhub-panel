@@ -55,8 +55,10 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
             b'A'..=b'Z' => Some(byte - b'A'),
             b'a'..=b'z' => Some(byte - b'a' + 26),
             b'0'..=b'9' => Some(byte - b'0' + 52),
-            b'-' | b'+' => Some(62),
-            b'_' | b'/' => Some(63),
+            // Base64url uses `-`/`_` only; the classic `+`/`/` are rejected so a
+            // mistyped standard-base64 segment cannot silently decode.
+            b'-' => Some(62),
+            b'_' => Some(63),
             _ => None,
         }
     }
@@ -111,6 +113,14 @@ c2lnbmF0dXJlLXBsYWNlaG9sZGVyLW5vdC1hLXJlYWwta2V5";
         assert_eq!(expiry("!!!.!!!.!!!"), None);
         // Not expired-by-default, so the server remains the authority.
         assert!(!is_expired("garbage", 1));
+    }
+
+    #[test]
+    fn rejects_classic_base64_alphabet() {
+        // JWT segments use base64url (`-`/`_`); the classic `+`/`/` must not
+        // decode as if valid, or a mistyped token could be misread.
+        assert_eq!(base64url_decode("a+b"), None);
+        assert_eq!(base64url_decode("a/b"), None);
     }
 
     #[test]

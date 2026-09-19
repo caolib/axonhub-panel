@@ -5,7 +5,7 @@
 
 ## 修复进度汇总
 
-> 更新时间：2026-09-19。本轮已实际运行 `cargo check`（0 警告）与 `cargo test`（66 passed / 0 failed），整机编译与单测全绿；静态复核与凭据落日志核查均已执行。
+> 更新时间：2026-09-19（第二轮：修复轻微项 #9–#16）。本轮已实际运行 `cargo check --tests`（0 警告）与 `cargo test`（**68 passed / 0 failed**，较上轮新增 2 条针对性用例），整机编译与单测全绿；静态复核与凭据落日志核查均已执行。
 > 状态图例：✅ 已修复 / 🔄 进行中 / ⬜ 未处理（超出本轮范围）。
 
 | 编号 | 问题一句话 | 状态 | 落地文件 | 验证结果 |
@@ -19,7 +19,14 @@
 | #7 | 全程缺日志/追踪，后台失败只能看状态栏 | ✅ 已修复 | `Cargo.toml` / `main.rs` / `config.rs` / `client.rs` / `worker.rs` / `app.rs` | 引入 `tracing` + 文件 subscriber（`main.rs:503-513`）；吞错点插桩（`config.rs`/`client.rs`/`worker.rs`/`app.rs`）。`cargo check` + `cargo test` 全绿（66 passed/0 failed）；日志经复核不写凭据 |
 | #8 | 退出被阻塞请求拖住最多 12 秒 | ✅ 已修复 | `worker.rs` | 主循环改用 `recv_timeout` 分段等待(302)，取代 `std::thread::sleep` |
 | 模型名括号 | 显示模型名用 `「」` 包裹 | ✅ 已修复 | `model.rs` | `display_model()`(382-387) 改为 `[]` 包裹 |
-| #9–#16 | 轻微项（上帝模块、重复样板、base64 容错等） | ⬜ 未处理 | — | 本轮未纳入，见原「优先修复建议」 |
+| #9 | main.rs 上帝模块 | 🔄 部分处理 | `src/ui/clipboard.rs` / `main.rs` | 剪贴板读写抽出为 `ui::clipboard` 模块，`main.rs` 2762→2710 行；完整窗口过程拆分仍留待后续（见下） |
+| #10 | 两个窗口过程重复 Win32 样板 | ✅ 已修复 | `main.rs` | 抽出 `with_double_buffer()`(1494)，`paint`(1524)/`paint_detail`(2664) 共用；工作区约束早已共用 `clamp_window_rect` |
+| #11 | token.rs base64url 对 `+`/`/` 过宽容忍 | ✅ 已修复 | `src/token.rs` | `value()`(58-61) 仅接受 `-`/`_`；新增用例 `rejects_classic_base64_alphabet` |
+| #12 | model.rs 计数基于被截断的 executions | ✅ 已修复 | `src/model.rs` | 新增 `attempts_truncated` 字段；`is_error()`(375-383) 截断时保守返回 true；新增用例覆盖 12 次尝试场景 |
+| #13 | app.rs 过滤在 truncate 之后执行 | ✅ 已满足 | `src/app.rs` | 代码实为「先 `retain` 过滤(180)再 `truncate`(183)」，原描述滞后于代码，无需改动 |
+| #14 | 双缓冲绘制对 GDI 空句柄无防护 | ✅ 已修复 | `main.rs` | `with_double_buffer()`(1500-1507) 对 `CreateCompatibleDC`/`CreateCompatibleBitmap` 做 `is_invalid()` 检查，失败即释放并返回 |
+| #15 | theme.rs 裸 `unsafe impl Send for Fonts` | ✅ 已修复 | `src/theme.rs` | 移除 `unsafe impl Send`，改为 `PhantomData<Rc<()>>`(95-99) 使 `Fonts` 成为 `!Send`/`!Sync`，以类型系统表达「仅 UI 线程」 |
+| #16 | paint/save 等写入错误被静默忽略 | ✅ 已修复 | `config.rs` / `main.rs` / `src/ui/clipboard.rs` | `config.save()` 已 `warn!`；剪贴板 `set_clipboard_text` 三处失败分支均 `warn!`（打开/分配/写入） |
 
 ---
 
@@ -156,25 +163,34 @@
 ## 轻微（Minor）
 
 ### 9. main.rs 是 ~2726 行「上帝模块」
-- **状态**：⬜ 未处理（本轮未纳入，见原「优先修复建议」）
-- **涉及模块 / 文件**：`src/main.rs`
-- **具体证据**：`src/main.rs` 同时含面板窗口过程 `wnd_proc(:943)`、详情弹窗窗口过程 `detail_proc(:2419)`、右键菜单、剪贴板读写、双缓冲绘制、输入分发、所有 `Action` 枚举与执行。
+- **状态**：🔄 部分处理
+- **落地位置**：新增 `src/ui/clipboard.rs`；`src/ui/mod.rs` 导出 `clipboard`
+- **验证结果**：剪贴板读写（`clipboard_text` / `set_clipboard_text`）已从 `main.rs` 抽到 `ui::clipboard` 模块，`main.rs` 由 2762 → 2710 行；相关 Win32 导入（簇板 / 全局内存 / `CF_UNICODETEXT`）已从 `main.rs` 剪除，`cargo check --tests` 0 警告。详情弹窗的**绘制**此前已位于 `src/ui/detail.rs`。
+- **备注**：完整拆分（把 `wnd_proc` / `detail_proc` 两个窗口过程本体的几何、菜单等一并外移）会级联改动 `window_scale` / `single_line_mode` 等 `main.rs` 私有辅助与两处窗口过程调用点，改动面大且难以在本轮做运行时回归，故留待后续；本轮已消除最具自包含性的剪贴板部分。
+- **涉及模块 / 文件**：`src/main.rs`、`src/ui/clipboard.rs`、`src/ui/mod.rs`
 - **建议改法**：把 `detail_proc` 及其绘制 / 输入拆到 `ui/detail` 或独立 `popup.rs`；菜单 / 剪贴板 / 几何辅助也拆分。
 
 ### 10. 两个窗口过程重复大量 Win32 样板
-- **状态**：⬜ 未处理（本轮未纳入，见原「优先修复建议」）
+- **状态**：✅ 已修复
+- **落地位置**：`src/main.rs:1494`（`with_double_buffer`）
+- **验证结果**：`paint`(1524) 与 `paint_detail`(2664) 现共用 `with_double_buffer(hdc, rc, |painter| …)`，双缓冲的建 DC / 位图、填背景、`BitBlt`、清理样板已消除；工作区约束此前即由公共 `clamp_window_rect` / `work_area_*` 供两处窗口过程共用（`grep` 确认）。`cargo check --tests` 0 警告。
 - **涉及模块 / 文件**：`src/main.rs`（`wnd_proc` 与 `detail_proc`）
 - **具体证据**：`wnd_proc` 与 `detail_proc` 各自重写 `WM_PAINT` 双缓冲（位图 / DC / `BitBlt`）、`WM_NCHITTEST`、`WM_SETCURSOR`、`WM_MOUSEWHEEL`、`WM_SIZING` / `WM_MOVING` / `WM_WINDOWPOSCHANGING` 约束到工作区、`WM_GETMINMAXINFO`。
 - **建议改法**：抽取 `double_buffer_paint`、公共 `clamp_to_work_area` 辅助复用。
 
 ### 11. token.rs 自实现 base64url 对 +/` 过宽容忍
-- **状态**：⬜ 未处理（本轮未纳入，见原「优先修复建议」）
+- **状态**：✅ 已修复
+- **落地位置**：`src/token.rs:57-61`
+- **验证结果**：`value()` 现为 `b'-' => Some(62)`、`b'_' => Some(63)`，`+` / `/` 归入 `_ => None`。新增用例 `rejects_classic_base64_alphabet` 断言 `base64url_decode("a+b")` 与 `("a/b")` 均为 `None`；`cargo test` 通过。
 - **涉及模块 / 文件**：`src/token.rs`
 - **具体证据**：`token.rs:52-81` `value()` 中 `b'-' | b'+' => Some(62)`、`b'_' | b'/' => Some(63)`
 - **建议改法**：base64url 只接受 `-` / `_`，遇到 `+` / `/` 直接返回 `None`。
 
 ### 12. model.rs 失败 / 重试计数基于列表查询里被截断的 executions(first:10)
-- **状态**：⬜ 未处理（本轮未纳入，见原「优先修复建议」）
+- **状态**：✅ 已修复
+- **落地位置**：`src/model.rs`（`Row::attempts_truncated` 字段、`from_wire`、`is_error`）
+- **验证结果**：`Row` 新增 `attempts_truncated: bool`，`from_wire` 以 `total_count > edges.len()` 判定是否被截断；`is_error()` 在截断时保守返回 `true`，保证卡片仍可点开详情。新增用例 `a_request_with_more_attempts_than_fetched_stays_clickable`（12 次尝试 / 10 条 edges）断言 `attempts_truncated == true` 且 `is_error() == true`；`cargo test` 通过。
+- **备注**：`attempt_count` 仍取连接的 `total_count`（本就为全量），故仅需修正对 `failed_attempts` 完整性的假设。
 - **涉及模块 / 文件**：`client.rs`、`model.rs`
 - **具体证据**：
   - `client.rs:29` 列表查询 `executions(first: 10, ...)`
@@ -182,26 +198,37 @@
 - **建议改法**：不要依赖被截断计数判定「是否值得点开」，或超 10 次保守标记为可点开。
 
 ### 13. app.rs 过滤在 truncate(row_limit) 之后执行
-- **状态**：⬜ 未处理（本轮未纳入，见原「优先修复建议」）
+- **状态**：✅ 已满足（代码现状即正确，原描述滞后）
+- **落地位置**：`src/app.rs:177-189`
+- **验证结果**：`rebuild()` 现为「排序 → `retain` 按掩码过滤(180-182) → `truncate(row_limit)`(183)」，即**先过滤再截断**，符合建议语义；`filter_keeps_only_matching_rows` 等用例通过。原文所引 `先 truncate 再 retain` 的代码已不存在，无需改动。
 - **涉及模块 / 文件**：`src/app.rs`
 - **具体证据**：`app.rs:172-184` 先 `rows.truncate(...)` 再按状态掩码 `retain`
 - **建议改法**：先过滤再截断（或过滤后不足时回退补齐）。
 
 ### 14. 双缓冲绘制对 GDI 空句柄无防护
-- **状态**：⬜ 未处理（本轮未纳入，见原「优先修复建议」）
+- **状态**：✅ 已修复
+- **落地位置**：`src/main.rs:1494-1522`（`with_double_buffer`）
+- **验证结果**：`CreateCompatibleDC` 返回无效句柄时直接返回 `None`；`CreateCompatibleBitmap` 无效时先 `DeleteDC(mem)` 再返回 `None`，均不再进入 `SelectObject` / `BitBlt` / `DeleteObject`。返回 `Option`，调用方以 `let _ =` / `.unwrap_or(0.0)` 容忍失败且不绘制。
 - **涉及模块 / 文件**：`src/main.rs`
 - **具体证据**：`main.rs:1504-1540` 与 `main.rs:2688-2719` 中若 `CreateCompatibleDC` / `CreateCompatibleBitmap` 返回 null，仍继续 `SelectObject` / `BitBlt` / `DeleteObject`。
 - **建议改法**：任一 GDI 对象创建失败直接 `EndPaint` 返回，不继续绘制。
 
 ### 15. theme.rs unsafe impl Send for Fonts 仅靠「只用 UI 线程」约定保证
-- **状态**：⬜ 未处理（本轮未纳入，见原「优先修复建议」）
+- **状态**：✅ 已修复
+- **落地位置**：`src/theme.rs:85-99`
+- **验证结果**：已删除 `unsafe impl Send for Fonts {}`，改为新增字段 `_ui_thread: PhantomData<std::rc::Rc<()>>`，使 `Fonts` 成为 `!Send` + `!Sync`。`State` 存于 `thread_local!`（`main.rs:252-256`）本就 `!Send`，故编译不受影响；类型系统现会**拒绝**任何把 `Fonts` 移出 UI 线程的代码。`cargo check --tests` 0 警告。
+- **备注**：`*mut T` 天生即 `Send`，原先的 `unsafe impl Send` 实为冗余「声明」；真正有意义的加固是反向约束为 `!Send`。
 - **涉及模块 / 文件**：`src/theme.rs`
 - **具体证据**：`theme.rs:92-97` 字体 / 字族是裸指针 `*mut GpFontFamily` 并手动 `unsafe impl Send`
 - **建议改法**：用 `thread_local` 或类型系统约束（如 `NonSend` / `!Send` 包装）表达「仅 UI 线程」，避免裸 `unsafe impl Send`。
 
 ### 16. paint / save 等写入错误被静默忽略（与 #3 / #7 同源）
-- **状态**：⬜ 未处理（本轮未纳入，见原「优先修复建议」）
-- **涉及模块 / 文件**：`config.rs`、`src/main.rs`
+- **状态**：✅ 已修复
+- **落地位置**：`config.rs:264-268`、`src/ui/clipboard.rs`
+- **验证结果**：
+  - `config.save()` 现为 `if let Err(e) = self.try_save() { warn!("配置保存失败: {e}") }`（`config.rs:264-268`），写盘错误已记录（上轮 #7 已落地）。
+  - 剪贴板 `set_clipboard_text` 三处失败分支（打开剪贴板 / 分配内存 / `SetClipboardData` 交接）均补 `warn!`，不再静默 `return`。
+- **涉及模块 / 文件**：`config.rs`、`src/main.rs`、`src/ui/clipboard.rs`
 - **具体证据**：
   - `config.rs:201-204` `let _ = std::fs::write(config_path(), json)`
   - `main.rs:2400-2416` 剪贴板写入失败也 `return`
@@ -211,8 +238,8 @@
 
 ## 优先修复建议
 
-1. **先做 #1**（加 TLS feature，否则远程部署不可用）和 **#2**（共享 / 下发 `Config` 给 worker）。
-2. **其次 #3 / #4**（静默数据丢失与密码输入 bug 直接影响日常使用）。
-3. 其余（#5 ~ #16）纳入后续清理。
+1. **先做 #1**（加 TLS feature，否则远程部署不可用）和 **#2**（共享 / 下发 `Config` 给 worker）。—— 已完成
+2. **其次 #3 / #4**（静默数据丢失与密码输入 bug 直接影响日常使用）。—— 已完成
+3. 其余（#5 ~ #16）：#5–#8、#10–#16 已完成；#9 已抽出剪贴板模块、消除双缓冲重复，完整窗口过程拆分留待后续。
 
 > 注：#2 与 #6 强相关 —— #2 修复后，`SignedIn` 解析出的 project_id 才能通过共享配置或命令下发真正到达 worker，#6 的写盘持久化才有意义。

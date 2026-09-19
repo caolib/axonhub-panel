@@ -15,27 +15,22 @@ mod worker;
 
 use std::cell::RefCell;
 
+use ui::clipboard::{clipboard_text, set_clipboard_text};
+
 use windows::Win32::Foundation::{
-    COLORREF, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, CreateSolidBrush,
-    DeleteDC, DeleteObject, EndPaint, FillRect, GetDeviceCaps, GetMonitorInfoW, HGDIOBJ, HORZSIZE,
-    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromPoint,
-    MonitorFromRect, MonitorFromWindow, PAINTSTRUCT, SRCCOPY, SelectObject, VERTSIZE,
+    DeleteDC, DeleteObject, EndPaint, FillRect, GetDeviceCaps, GetMonitorInfoW, HDC, HGDIOBJ,
+    HORZSIZE, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW,
+    MonitorFromPoint, MonitorFromRect, MonitorFromWindow, PAINTSTRUCT, SRCCOPY, SelectObject,
+    VERTSIZE,
 };
 use windows::Win32::Graphics::GdiPlus::{
     GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GdiplusStartupOutput,
 };
-use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    SetClipboardData,
-};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-use windows::Win32::System::Memory::{
-    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
-};
-use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -89,39 +84,6 @@ const TIMER_POLL: usize = 1;
 const TIMER_CARET: usize = 2;
 /// Repaints so relative timestamps ("3 分钟前") stay honest while idle.
 const TIMER_CLOCK: usize = 3;
-
-/// Read Unicode text from the clipboard. Returns `None` when the clipboard is
-/// empty, holds no text, or is momentarily locked by another process.
-fn clipboard_text() -> Option<String> {
-    unsafe {
-        if IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32).is_err() {
-            return None;
-        }
-        OpenClipboard(None).ok()?;
-        // Every exit below must close the clipboard, or the rest of the desktop
-        // is left unable to use copy/paste.
-        let result = (|| {
-            let handle = GetClipboardData(CF_UNICODETEXT.0 as u32).ok()?;
-            let hglobal = windows::Win32::Foundation::HGLOBAL(handle.0);
-            let ptr = GlobalLock(hglobal) as *const u16;
-            if ptr.is_null() {
-                return None;
-            }
-            // Bound the scan by the allocation size: clipboard text is
-            // NUL-terminated but the buffer may not be exactly sized.
-            let max_units = GlobalSize(hglobal) / std::mem::size_of::<u16>();
-            let mut len = 0usize;
-            while len < max_units && *ptr.add(len) != 0 {
-                len += 1;
-            }
-            let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
-            let _ = GlobalUnlock(hglobal);
-            Some(text)
-        })();
-        let _ = CloseClipboard();
-        result
-    }
-}
 
 /// Whether Ctrl (or Shift for Ctrl+Shift+V) is held.
 fn ctrl_down() -> bool {
@@ -1523,6 +1485,42 @@ fn save_window_state(hwnd: HWND) {
     });
 }
 
+/// Render a frame into an off-screen bitmap and present it with a single
+/// `BitBlt`. Centralises the double-buffer scaffolding shared by `paint` and
+/// `paint_detail`, and bails out cleanly if either GDI allocation fails
+/// (design issue #14) so a failed `CreateCompatibleDC`/`CreateCompatibleBitmap`
+/// can never feed a null handle into `SelectObject`/`BitBlt`. Returns whatever
+/// `draw` produced, or `None` if the buffer could not be set up.
+fn with_double_buffer<F, R>(hdc: HDC, rc: RECT, draw: F) -> Option<R>
+where
+    F: FnOnce(Painter) -> R,
+{
+    unsafe {
+        let mem = CreateCompatibleDC(Some(hdc));
+        if mem.is_invalid() {
+            return None;
+        }
+        let bitmap = CreateCompatibleBitmap(hdc, rc.right.max(1), rc.bottom.max(1));
+        if bitmap.is_invalid() {
+            let _ = DeleteDC(mem);
+            return None;
+        }
+        let previous = SelectObject(mem, HGDIOBJ(bitmap.0));
+
+        let brush = CreateSolidBrush(COLORREF(theme::BG & 0x00FF_FFFF));
+        FillRect(mem, &rc, brush);
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+
+        let result = Painter::new(mem).map(draw);
+
+        let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, Some(mem), 0, 0, SRCCOPY);
+        SelectObject(mem, previous);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(mem);
+        result
+    }
+}
+
 fn paint(hwnd: HWND) {
     unsafe {
         let mut ps = PAINTSTRUCT::default();
@@ -1539,15 +1537,7 @@ fn paint(hwnd: HWND) {
         // Draw the whole frame into an off-screen bitmap and present it with one
         // BitBlt. Painting the window DC directly lets each invalidate show a
         // partially drawn frame, which the user sees as flicker.
-        let mem = CreateCompatibleDC(Some(hdc));
-        let bitmap = CreateCompatibleBitmap(hdc, rc.right.max(1), rc.bottom.max(1));
-        let previous = SelectObject(mem, HGDIOBJ(bitmap.0));
-
-        let brush = CreateSolidBrush(COLORREF(theme::BG & 0x00FF_FFFF));
-        FillRect(mem, &rc, brush);
-        let _ = DeleteObject(HGDIOBJ(brush.0));
-
-        if let Some(painter) = Painter::new(mem) {
+        let _ = with_double_buffer(hdc, rc, |painter| {
             State::with(|s| {
                 if s.app.is_login() {
                     if let Some(form) = s.app.login.as_ref() {
@@ -1569,12 +1559,8 @@ fn paint(hwnd: HWND) {
                     panel::draw(&painter, &s.fonts, m, &view);
                 }
             });
-        }
+        });
 
-        let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, Some(mem), 0, 0, SRCCOPY);
-        SelectObject(mem, previous);
-        let _ = DeleteObject(HGDIOBJ(bitmap.0));
-        let _ = DeleteDC(mem);
         let _ = EndPaint(hwnd, &ps);
     }
 }
@@ -2425,33 +2411,6 @@ fn copy_detail_text() {
     }
 }
 
-/// Put `text` on the clipboard as `CF_UNICODETEXT`, replacing its contents. A
-/// clipboard another process is holding is left alone: copying is a nicety.
-fn set_clipboard_text(text: &str) {
-    unsafe {
-        if OpenClipboard(None).is_err() {
-            return;
-        }
-        let _ = EmptyClipboard();
-        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-        if let Ok(handle) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * std::mem::size_of::<u16>()) {
-            let ptr = GlobalLock(handle) as *mut u16;
-            if ptr.is_null() {
-                let _ = GlobalFree(Some(handle));
-            } else {
-                std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
-                let _ = GlobalUnlock(handle);
-                // Ownership passes to the clipboard; only a failed hand-off
-                // leaves us holding the block.
-                if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(handle.0))).is_err() {
-                    let _ = GlobalFree(Some(handle));
-                }
-            }
-        }
-        let _ = CloseClipboard();
-    }
-}
-
 unsafe extern "system" fn detail_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let mut actions: Vec<Action> = Vec::new();
 
@@ -2705,7 +2664,7 @@ fn detail_key(hwnd: HWND, wp: WPARAM, actions: &mut Vec<Action>) {
 fn paint_detail(hwnd: HWND) {
     let popup = detail_metrics(hwnd);
     let view_h = popup.content_view_h();
-    let mut content_h = 0.0f32;
+    let content_h;
 
     unsafe {
         let mut ps = PAINTSTRUCT::default();
@@ -2721,16 +2680,8 @@ fn paint_detail(hwnd: HWND) {
             }
         });
 
-        let mem = CreateCompatibleDC(Some(hdc));
-        let bitmap = CreateCompatibleBitmap(hdc, rc.right.max(1), rc.bottom.max(1));
-        let previous = SelectObject(mem, HGDIOBJ(bitmap.0));
-
-        let brush = CreateSolidBrush(COLORREF(theme::BG & 0x00FF_FFFF));
-        FillRect(mem, &rc, brush);
-        let _ = DeleteObject(HGDIOBJ(brush.0));
-
-        if let Some(painter) = Painter::new(mem) {
-            content_h = State::with(|s| {
+        content_h = with_double_buffer(hdc, rc, |painter| {
+            State::with(|s| {
                 let Some(open) = s.detail.as_ref() else {
                     return 0.0;
                 };
@@ -2744,13 +2695,10 @@ fn paint_detail(hwnd: HWND) {
                 };
                 detail::draw(&painter, &s.fonts, &popup, &view)
             })
-            .unwrap_or(0.0);
-        }
+            .unwrap_or(0.0)
+        })
+        .unwrap_or(0.0);
 
-        let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, Some(mem), 0, 0, SRCCOPY);
-        SelectObject(mem, previous);
-        let _ = DeleteObject(HGDIOBJ(bitmap.0));
-        let _ = DeleteDC(mem);
         let _ = EndPaint(hwnd, &ps);
     }
 
