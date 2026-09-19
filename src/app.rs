@@ -8,6 +8,7 @@ use crate::config::{Config, Credentials, Stored};
 use crate::model::{self, Filter, FilterMask, Row};
 use crate::ui::login::{LoginForm, Method};
 use crate::worker::{Command, Update, Worker};
+use tracing::info;
 
 /// Which surface the panel is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +32,6 @@ pub struct App {
     pub scroll: f32,
     pub hover: Option<usize>,
     pub selected: Option<usize>,
-    pub paused: bool,
     pub user_name: Option<String>,
     /// Transient status line; `true` marks an error presentation.
     pub status: Option<(String, bool)>,
@@ -60,7 +60,6 @@ impl App {
             scroll: 0.0,
             hover: None,
             selected: None,
-            paused: false,
             user_name: None,
             status: None,
             login,
@@ -101,6 +100,7 @@ impl App {
                     self.user_name = Some(user.user.display_name());
                     self.view = View::List;
                     self.status = Some(("已登录".into(), false));
+                    info!("登录成功");
 
                     // Record the freshly issued token under the current mode,
                     // keeping whatever the form already established about which
@@ -118,6 +118,11 @@ impl App {
                     self.stored = stored.clone();
                     self.config.store(&stored);
 
+                    // #6 持久化 project_id 等配置到 config.json（凭据在独立加密
+                    // blob，不会进入 config.json）。
+                    self.save();
+                    // #2 把解析出的 project 同步给 worker，否则它仍用启动时旧值。
+                    worker.send(Command::SetProject(Some(self.config.project_id.clone())));
                     worker.send(Command::SetToken(token));
                 }
                 Update::Snapshot { rows, total } => {

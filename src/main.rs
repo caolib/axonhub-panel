@@ -226,7 +226,6 @@ fn current_visible_rows(hwnd: HWND) -> usize {
 
 /// Context-menu command ids.
 const MENU_REFRESH: usize = 1001;
-const MENU_PAUSE: usize = 1002;
 const MENU_SIGNIN: usize = 1100;
 const MENU_OPEN: usize = 1101;
 const MENU_TOPMOST: usize = 1200;
@@ -476,8 +475,47 @@ fn monitor_density(hwnd: HWND) -> Option<f32> {
     }
 }
 
+/// 初始化文件日志。在 `main` 中任何可能失败的操作之前调用一次。
+///
+/// 日志写到 `base_dir()/panel.log`：这是 GUI 程序，控制台不可见，文件才有意义。
+/// 初始化失败（目录无法创建、文件无法打开）一律容错——面板照常运行，只是失去
+/// 审计轨迹。幂等：重复调用不会 panic，只保留首个 subscriber。
+fn init_logging() {
+    let dir = config::base_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        // 连日志目录都建不了，放弃文件日志（不可见，无需崩溃）。
+        return;
+    }
+    let path = dir.join("panel.log");
+
+    // 每次写事件重新打开并追加：实现简单、跨线程安全，且无需日志轮转。
+    // 失败时退化为 `io::sink`，绝不 panic。
+    let make_writer = {
+        let path = path.clone();
+        move || -> Box<dyn std::io::Write + Send> {
+            match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(file) => Box::new(file),
+                Err(_) => Box::new(std::io::sink()),
+            }
+        }
+    };
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(make_writer)
+        .with_ansi(false)
+        .with_target(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    // 幂等：已初始化则保留原有 subscriber，忽略错误。
+    let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
 fn main() {
     unsafe {
+        init_logging();
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         // Dark Win32 menus: load SetPreferredAppMode from uxtheme.dll.
         let uxtheme: Vec<u16> = "uxtheme.dll"
@@ -1925,6 +1963,8 @@ fn submit_login(hwnd: HWND) {
         form.busy = true;
         form.error = None;
         s.app.config.endpoint = form.endpoint.trim().to_string();
+        // #2 登录表单改了 endpoint，必须同步给 worker（否则它仍打旧 endpoint）。
+        s.worker.send(Command::SetEndpoint(s.app.config.endpoint.clone()));
         // The mode chosen in the form is what governs persistence, so it has to
         // reach the config before `store` consults it. Without this the click on
         // `凭据:` was cosmetic and the token was dropped on the floor.
@@ -1980,10 +2020,6 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
     let id = (wp.0 & 0xFFFF) as usize;
     State::with(|s| match id {
         MENU_REFRESH => s.worker.send(Command::RefreshNow),
-        MENU_PAUSE => {
-            s.app.paused = !s.app.paused;
-            s.worker.send(Command::Pause(s.app.paused));
-        }
         MENU_TOPMOST => {
             let on = !s.app.config.always_on_top;
             s.app.config.always_on_top = on;

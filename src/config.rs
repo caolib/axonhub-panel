@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,8 +154,9 @@ pub struct Credentials {
 /// Directory holding the config and the encrypted credential blob.
 ///
 /// `AH_PANEL_HOME` overrides it, for pointing the panel at a different profile.
-/// Defaults to `%APPDATA%\ah-panel`.
-fn base_dir() -> PathBuf {
+/// Defaults to `%APPDATA%\ah-panel`. Public so the binary can place its log
+/// file next to the config (design issue #7).
+pub fn base_dir() -> PathBuf {
     if let Some(dir) = std::env::var("AH_PANEL_HOME")
         .ok()
         .filter(|s| !s.is_empty())
@@ -178,28 +180,90 @@ fn credentials_path_in(dir: &Path) -> PathBuf {
     dir.join("credentials.bin")
 }
 
+/// Outcome of a config load, exposed so a future UI can surface a
+/// "your config was corrupt and replaced with defaults" notice.
+///
+/// `Ok` covers both a clean read and the first launch (no file yet). `Corrupt`
+/// means the on-disk file existed but was unreadable, and a copy of it has been
+/// preserved under `<base>.json.corrupt` so the bytes are not lost silently.
+pub enum ConfigLoadStatus {
+    Ok,
+    Corrupt,
+}
+
 impl Config {
-    pub fn load() -> Self {
-        let mut config: Config = std::fs::read_to_string(config_path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        // A hand-edited file may hold NaN, infinity or a value outside the
-        // 10–24 range the menu offers; fall back to the authored 12.5 so a bad
-        // number can never shrink the panel to nothing or blow it up.
-        if !config.font_size.is_finite() || !(10.0..=24.0).contains(&config.font_size) {
-            config.font_size = 12.5;
+    /// Load the config, additionally reporting whether a corrupt file had to be
+    /// discarded (and preserved) so callers can warn the user.
+    pub fn load_with_status() -> (Config, ConfigLoadStatus) {
+        match std::fs::read_to_string(config_path()) {
+            // First launch: no file to read. Nothing is corrupt, nothing to back
+            // up, so defaults with a clean status.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (Config::default(), ConfigLoadStatus::Ok)
+            }
+            // The file exists but cannot be read (permissions, locked, etc.).
+            // There are no readable bytes to preserve, so fall back with a
+            // `Corrupt` status but do not create a backup.
+            Err(_) => {
+                warn!(
+                    "配置文件存在但无法读取,回退默认配置: {}",
+                    config_path().display()
+                );
+                (Config::default(), ConfigLoadStatus::Corrupt)
+            }
+            Ok(raw) => match serde_json::from_str::<Config>(&raw) {
+                Ok(mut config) => {
+                    // A hand-edited file may hold NaN, infinity or a value
+                    // outside the 10–24 range the menu offers; fall back to the
+                    // authored 12.5 so a bad number can never shrink the panel
+                    // to nothing or blow it up. Kept exactly as before.
+                    if !config.font_size.is_finite()
+                        || !(10.0..=24.0).contains(&config.font_size)
+                    {
+                        config.font_size = 12.5;
+                    }
+                    (config, ConfigLoadStatus::Ok)
+                }
+                Err(_) => {
+                    // The file existed but would not parse — hand-edited into
+                    // invalid JSON, or a write was interrupted mid-flush. Keep
+                    // the bytes before dropping to defaults so the user can
+                    // recover them.
+                    warn!(
+                        "配置文件损坏,已备份并回退默认配置: {}",
+                        config_path().display()
+                    );
+                    preserve_corrupt(&config_path(), &raw);
+                    (Config::default(), ConfigLoadStatus::Corrupt)
+                }
+            },
         }
-        config
     }
 
-    pub fn save(&self) {
+    /// Load the config. Return type is unchanged so existing call sites need no
+    /// edits; internally this is just `load_with_status().0`.
+    pub fn load() -> Self {
+        Self::load_with_status().0
+    }
+
+    /// Save, returning the underlying I/O error instead of swallowing it. Lets a
+    /// caller report a failure rather than lose settings with no signal.
+    pub fn try_save(&self) -> std::io::Result<()> {
         let dir = base_dir();
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(config_path(), json);
+        std::fs::create_dir_all(&dir)?;
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(config_path(), json)?;
+        Ok(())
+    }
+
+    /// Save the config. Public signature is unchanged; errors are no longer
+    /// silently dropped, but we still avoid panicking here — a write failure is
+    /// surfaced to the log (design issue #7) and otherwise ignored so the caller
+    /// does not need to handle it.
+    pub fn save(&self) {
+        if let Err(e) = self.try_save() {
+            warn!("配置保存失败: {e}");
         }
     }
 
@@ -216,6 +280,54 @@ impl Config {
     pub fn store(&self, stored: &Stored) {
         store_in(&base_dir(), self.credential_mode, stored);
     }
+}
+
+/// Keep a byte-for-byte copy of a config file we failed to parse, so the user's
+/// hand edits or a half-written file are not silently destroyed.
+///
+/// Strategy, in order: rename to `<base>.json.corrupt`; if a backup already
+/// exists there, append a Unix timestamp to avoid clobbering it; if rename fails
+/// (most likely a cross-volume move, where `rename` cannot relocate data), fall
+/// back to writing a copy of the raw bytes and removing the original. The goal
+/// is to preserve the bad bytes whenever physically possible.
+fn preserve_corrupt(path: &Path, raw: &str) {
+    let corrupt_path = path.with_extension("json.corrupt");
+    // A previous corrupt backup already sits at the default name — keep it and
+    // timestamp this one instead of overwriting the earlier copy.
+    let target = if corrupt_path.exists() {
+        path.with_extension(format!("json.corrupt.{}", unix_now()))
+    } else {
+        corrupt_path
+    };
+
+    // Prefer a cheap rename on the same volume.
+    if std::fs::rename(path, &target).is_ok() {
+        warn!("已备份损坏的配置文件到: {}", target.display());
+        return;
+    }
+    // Cross-volume (or otherwise refused) rename: write the bytes out to the
+    // target and, on success, drop the original so the panel's next save starts
+    // from a clean slate.
+    if std::fs::write(&target, raw.as_bytes()).is_ok() {
+        warn!("已备份损坏的配置文件到: {}", target.display());
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    // Both attempts failed: the bad bytes are unrecoverable. Log so the loss is
+    // at least visible in the audit trail.
+    warn!(
+        "无法备份损坏的配置文件(字节已丢失): {}",
+        path.display()
+    );
+}
+
+/// Seconds since the Unix epoch, used to disambiguate successive corrupt
+/// backups. Falls back to 0 if the clock is somehow before the epoch.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// What a given mode is permitted to write, if anything.
@@ -249,12 +361,17 @@ fn store_in(dir: &Path, mode: CredentialMode, stored: &Stored) {
         return;
     };
     let Some(blob) = dpapi::protect(&plain) else {
+        // DPAPI 加密失败：绝对不能把明文凭据落到磁盘，因此直接放弃写入。
+        warn!("凭据加密(DPAPI)失败,未写入凭据文件");
         return;
     };
     if std::fs::create_dir_all(dir).is_err() {
+        warn!("无法创建凭据目录,未写入凭据: {}", dir.display());
         return;
     }
-    let _ = std::fs::write(credentials_path_in(dir), blob);
+    if let Err(e) = std::fs::write(credentials_path_in(dir), blob) {
+        warn!("凭据文件写入失败: {e}");
+    }
 }
 
 /// Read a token from the configured environment variable, if it is set and
@@ -282,8 +399,21 @@ pub fn load_stored() -> Option<Stored> {
 
 fn read_stored_in(dir: &Path) -> Option<Stored> {
     let blob = std::fs::read(credentials_path_in(dir)).ok()?;
-    let plain = dpapi::unprotect(&blob)?;
-    serde_json::from_slice(&plain).ok()
+    let plain = match dpapi::unprotect(&blob) {
+        Some(p) => p,
+        // DPAPI 解密失败（换了 Windows 用户、或 blob 损坏）：视作无凭据，不崩。
+        None => {
+            warn!("凭据解密(DPAPI)失败,忽略已保存凭据");
+            return None;
+        }
+    };
+    match serde_json::from_slice(&plain) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            warn!("凭据文件内容无法解析,忽略已保存凭据");
+            None
+        }
+    }
 }
 
 /// Forget the stored credentials. Deliberately does not touch `config.json`:

@@ -4,12 +4,13 @@
 //! values that the UI applies from its own timer, so painting never blocks on a
 //! socket and the panel stays responsive when AxonHub is slow or unreachable.
 
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{RecvTimeoutError, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use crate::client::{ApiError, Client, SignInResponse};
 use crate::config::{Config, Credentials};
 use crate::model::{ExecutionDetail, Row};
+use tracing::warn;
 
 /// Upper bound on a requests query before the panel gives up on it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -48,12 +49,15 @@ pub enum Command {
         creds: Credentials,
     },
     SetToken(String),
-    Pause(bool),
     RefreshNow,
     /// Adopt a new row count (the UI derives it from the window height).
     SetRowLimit(i64),
     /// Fetch one request's executions, for its detail popup.
     FetchDetail(String),
+    /// 替换 worker 目标 endpoint；登录时 UI 改了它，轮询线程不能再忽略。
+    SetEndpoint(String),
+    /// 替换解析出的 project_id；SignedIn 推导后必须同步给 worker。
+    SetProject(Option<String>),
     Shutdown,
 }
 
@@ -106,6 +110,53 @@ impl Drop for Worker {
     }
 }
 
+/// Apply one command to the worker's live state. Returns `true` when the
+/// worker should exit (`Shutdown`).
+fn apply_command(
+    command: Command,
+    config: &mut Config,
+    token: &mut Option<String>,
+    next_poll: &mut Instant,
+    force: &mut bool,
+    pending_creds: &mut Option<Credentials>,
+    pending_detail: &mut Option<String>,
+) -> bool {
+    match command {
+        Command::Shutdown => return true,
+        Command::RefreshNow => {
+            *next_poll = Instant::now();
+            *force = true;
+        }
+        Command::SetRowLimit(limit) => {
+            config.row_limit = limit;
+            *next_poll = Instant::now();
+            *force = true;
+        }
+        Command::SetToken(value) => {
+            *token = if value.is_empty() { None } else { Some(value) };
+            *next_poll = Instant::now();
+            *force = true;
+        }
+        Command::SetEndpoint(value) => {
+            config.endpoint = value;
+            *next_poll = Instant::now();
+            *force = true;
+        }
+        Command::SetProject(value) => {
+            config.project_id = value.unwrap_or_default();
+            *next_poll = Instant::now();
+            *force = true;
+        }
+        Command::SignIn { creds } => {
+            *pending_creds = Some(creds);
+            *next_poll = Instant::now();
+            *force = true;
+        }
+        Command::FetchDetail(id) => *pending_detail = Some(id),
+    }
+    false
+}
+
 fn run(
     mut config: Config,
     mut token: Option<String>,
@@ -116,7 +167,6 @@ fn run(
     let signin_client = Client::new(SIGNIN_TIMEOUT);
     let detail_client = Client::new(DETAIL_TIMEOUT);
 
-    let mut paused = false;
     let mut backoff = Duration::ZERO;
     let mut force = true;
     let mut pending_creds: Option<Credentials> = None;
@@ -129,33 +179,16 @@ fn run(
     loop {
         let mut shutdown = false;
         while let Ok(command) = commands.try_recv() {
-            match command {
-                Command::Shutdown => shutdown = true,
-                Command::Pause(value) => {
-                    paused = value;
-                    next_poll = Instant::now();
-                    force = true;
-                }
-                Command::RefreshNow => {
-                    next_poll = Instant::now();
-                    force = true;
-                }
-                Command::SetRowLimit(limit) => {
-                    config.row_limit = limit;
-                    next_poll = Instant::now();
-                    force = true;
-                }
-                Command::SetToken(value) => {
-                    token = if value.is_empty() { None } else { Some(value) };
-                    next_poll = Instant::now();
-                    force = true;
-                }
-                Command::SignIn { creds } => {
-                    pending_creds = Some(creds);
-                    next_poll = Instant::now();
-                    force = true;
-                }
-                Command::FetchDetail(id) => pending_detail = Some(id),
+            if apply_command(
+                command,
+                &mut config,
+                &mut token,
+                &mut next_poll,
+                &mut force,
+                &mut pending_creds,
+                &mut pending_detail,
+            ) {
+                shutdown = true;
             }
         }
         if shutdown {
@@ -175,6 +208,9 @@ fn run(
                 ),
                 None => Err(ApiError::Unauthorized),
             };
+            if let Err(e) = &result {
+                warn!("获取请求详情失败 (id={}): {}", id, e.message());
+            }
             let _ = updates.send(Update::Detail { id, result });
         }
 
@@ -189,6 +225,7 @@ fn run(
                     });
                 }
                 Err(err) => {
+                    warn!("登录失败: {}", err.message());
                     let _ = updates.send(Update::Failed(err));
                 }
             }
@@ -196,7 +233,7 @@ fn run(
             force = true;
         }
 
-        if !paused && (force || Instant::now() >= next_poll) {
+        if force || Instant::now() >= next_poll {
             force = false;
             // Recomputed every cycle: a busy gateway is polled faster, and
             // going idle must return to the slow cadence.
@@ -226,6 +263,7 @@ fn run(
                         }
                         Err(err) => {
                             let needs_auth = err.needs_signin();
+                            warn!("轮询 AxonHub 请求失败: {}", err.message());
                             let _ = updates.send(Update::Failed(err));
                             if needs_auth {
                                 token = None;
@@ -261,6 +299,29 @@ fn run(
         let wait = next_poll
             .saturating_duration_since(Instant::now())
             .clamp(Duration::from_millis(20), TICK);
-        std::thread::sleep(wait);
+        let deadline = Instant::now() + wait;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match commands.recv_timeout(remaining.min(TICK)) {
+                Ok(command) => {
+                    if apply_command(
+                        command,
+                        &mut config,
+                        &mut token,
+                        &mut next_poll,
+                        &mut force,
+                        &mut pending_creds,
+                        &mut pending_detail,
+                    ) {
+                        return;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        }
     }
 }

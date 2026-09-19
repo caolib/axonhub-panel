@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::json;
+use tracing::warn;
 
 use crate::model::{DetailData, Envelope, ExecutionDetail, Request};
 
@@ -330,9 +331,19 @@ fn extract_error(body: &str) -> Option<String> {
 fn map_transport(err: ureq::Error, auth: bool) -> ApiError {
     match err {
         ureq::Error::StatusCode(code) if auth && code == 401 => ApiError::Expired,
-        ureq::Error::StatusCode(code) => ApiError::Rejected(format!("HTTP {code}")),
-        ureq::Error::Timeout(_) => ApiError::Unreachable("连接超时".into()),
-        other => ApiError::Unreachable(other.to_string()),
+        ureq::Error::StatusCode(code) => {
+            warn!("请求被服务端拒绝: HTTP {code}");
+            ApiError::Rejected(format!("HTTP {code}"))
+        }
+        ureq::Error::Timeout(_) => {
+            warn!("连接 AxonHub 超时");
+            ApiError::Unreachable("连接超时".into())
+        }
+        // 非状态类传输错误：网络抖动、DNS、TLS 失败等。错误串不含任何凭据。
+        other => {
+            warn!("传输层错误(auth={auth}): {other}");
+            ApiError::Unreachable(other.to_string())
+        }
     }
 }
 

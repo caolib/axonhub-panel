@@ -153,8 +153,21 @@ impl LoginForm {
         }
     }
 
+    /// Whether `ch` is allowed in the currently focused text field.
+    ///
+    /// Endpoint / email / token are URL- or JWT-shaped ASCII, so they keep the
+    /// original ASCII-only policy. The password field accepts any printable
+    /// Unicode (everything except control characters) so non-ASCII passwords
+    /// (Chinese, emoji, …) are no longer silently dropped.
+    fn accepts(&self, ch: char) -> bool {
+        match self.focus {
+            Field::Password => !ch.is_control(),
+            _ => ch.is_ascii_graphic() || ch == ' ',
+        }
+    }
+
     pub fn insert(&mut self, ch: char) {
-        if !ch.is_ascii_graphic() && ch != ' ' {
+        if !self.accepts(ch) {
             return;
         }
         let limit = self.char_limit();
@@ -170,11 +183,16 @@ impl LoginForm {
     /// copied from DevTools can arrive with surrounding whitespace or a
     /// `Bearer ` prefix, and may contain newlines if the copy spanned lines.
     pub fn paste(&mut self, raw: &str) {
-        let cleaned: String = raw
-            .chars()
-            .filter(|c| c.is_ascii_graphic() || *c == ' ')
-            .collect();
-        let cleaned = cleaned.trim();
+        let cleaned: String = raw.chars().filter(|c| self.accepts(*c)).collect();
+        // A pasted password is kept verbatim: only control characters were
+        // filtered above, since a real password may legitimately contain
+        // leading/trailing spaces. Other fields may carry surrounding
+        // whitespace or a `Bearer ` prefix, so they keep the trim.
+        let cleaned: &str = if self.focus == Field::Password {
+            &cleaned
+        } else {
+            cleaned.trim()
+        };
         if cleaned.is_empty() {
             return;
         }

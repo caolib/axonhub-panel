@@ -377,14 +377,14 @@ impl Row {
     }
 
     /// The served model with its reasoning effort, e.g. `glm-5.2(max)`. When the
-    /// served model differs from the requested one, it is wrapped in 「」 instead
+    /// served model differs from the requested one, it is wrapped in [] instead
     /// of recoloured so the distinction is unambiguous.
     pub fn display_model(&self) -> String {
         let model = self.served_model();
         match (&self.reasoning_effort, self.is_routed()) {
-            (Some(effort), true) => format!("「{}({})」", model, effort),
+            (Some(effort), true) => format!("[{}({})]", model, effort),
             (Some(effort), false) => format!("{}({})", model, effort),
-            (None, true) => format!("「{}」", model),
+            (None, true) => format!("[{}]", model),
             (None, false) => model.to_string(),
         }
     }
