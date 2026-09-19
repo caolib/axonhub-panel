@@ -868,6 +868,8 @@ mod tests {
     fn row() -> Row {
         Row {
             id: "gid://axonhub/Request/42899".into(),
+            account_id: String::new(),
+            account_name: String::new(),
             created_at: Some("2026-09-18T11:28:03Z".into()),
             status: Status::Failed,
             model: "glm-5.3-flash".into(),

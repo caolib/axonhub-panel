@@ -8,10 +8,25 @@
 
 use windows::Win32::Graphics::GdiPlus::RectF;
 
+use crate::config::Account;
 use crate::format as fmt;
 use crate::model::{self, Filter, FilterMask, Row};
 use crate::theme::{self, Painter};
 use crate::ui::layout::{Metrics, Rect};
+
+/// Colours that mark which account a card came from, chosen by position in the
+/// account list so an account keeps its colour across repaints. Deliberately
+/// none of the status colours, which carry meaning of their own.
+const ACCOUNT_COLORS: [u32; 4] = [theme::MAUVE, theme::ORANGE, theme::CYAN, 0xFFB0_B8C4];
+
+/// The colour of one account's tag.
+fn account_color(accounts: &[Account], id: &str) -> u32 {
+    accounts
+        .iter()
+        .position(|a| a.id == id)
+        .map(|i| ACCOUNT_COLORS[i % ACCOUNT_COLORS.len()])
+        .unwrap_or(theme::TEXT_DIM)
+}
 
 /// Authored at 96 DPI; multiplied by `Metrics::scale` at draw time.
 const INNER_PAD: f32 = 7.0;
@@ -148,6 +163,8 @@ pub struct ListView<'a> {
     pub selected: Option<usize>,
     pub status_text: Option<(String, bool)>,
     pub user: Option<&'a str>,
+    /// Saved accounts; more than one means every card is tagged with its own.
+    pub accounts: &'a [Account],
     pub pinned: bool,
     /// Selected status-filter bits; the header chips highlight against this.
     pub filter: FilterMask,
@@ -494,8 +511,28 @@ fn draw_card(
         theme::ALIGN_FAR,
     );
 
-    // Remaining space between the marks and the time.
-    let cells_limit = time_x - 4.0 * m.scale;
+    // Account tag, immediately left of the time. Only when there is more than
+    // one account whose requests are merged here — with a single account it
+    // would say nothing.
+    let mut cells_limit = time_x - 4.0 * m.scale;
+    if v.accounts.len() > 1 && !row.account_name.is_empty() {
+        let color = account_color(v.accounts, &row.account_id);
+        let w = p.dual_measure(&fonts.small, &row.account_name);
+        let tag_x = cells_limit - w - 6.0 * m.scale;
+        if tag_x > x {
+            p.dual_text(
+                &fonts.small,
+                &row.account_name,
+                tag_x,
+                line1_y,
+                w + 2.0 * m.scale,
+                c.line1,
+                color,
+                theme::ALIGN_NEAR,
+            );
+            cells_limit = tag_x - 4.0 * m.scale;
+        }
+    }
 
     // Protocol name (chat/responses/messages): the interface type the client
     // spoke, placed right after the marks so it sits beside its indicators.
@@ -721,6 +758,24 @@ fn draw_card_single(
         theme::ALIGN_FAR,
     );
     right = time_x - 8.0 * s;
+
+    // Account tag, immediately left of the time; only when more than one
+    // account is merged into this list.
+    if v.accounts.len() > 1 && !row.account_name.is_empty() {
+        let color = account_color(v.accounts, &row.account_id);
+        let w = p.dual_measure(&fonts.small, &row.account_name);
+        p.dual_text(
+            &fonts.small,
+            &row.account_name,
+            right - w - 2.0 * s,
+            small_y,
+            w + 4.0 * s,
+            c.line2,
+            color,
+            theme::ALIGN_FAR,
+        );
+        right -= w + 10.0 * s;
+    }
 
     if let Some(tps) = row.tps() {
         let label = format!("{tps:.0} tok/s");
@@ -1015,6 +1070,7 @@ mod tests {
             selected: None,
             status_text: None,
             user: None,
+            accounts: &[],
             pinned,
             filter: model::FILTER_NONE,
         }
@@ -1082,6 +1138,8 @@ mod tests {
     fn row(status: Status) -> Row {
         Row {
             id: String::new(),
+            account_id: String::new(),
+            account_name: String::new(),
             created_at: None,
             status,
             model: String::new(),

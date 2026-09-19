@@ -218,6 +218,10 @@ fn normalize_format(f: &str) -> String {
 pub struct Row {
     /// Full GUID, e.g. `gid://axonhub/Request/33188`.
     pub id: String,
+    /// Which saved account the row came from. Empty in a single-account setup,
+    /// where there is nothing to tell apart.
+    pub account_id: String,
+    pub account_name: String,
     pub created_at: Option<String>,
     pub status: Status,
     pub model: String,
@@ -271,6 +275,10 @@ impl Row {
 
         Row {
             id: req.id.clone(),
+            // Filled in by whoever polled the request: `from_wire` sees one
+            // account's payload and has no idea which login it belongs to.
+            account_id: String::new(),
+            account_name: String::new(),
             created_at: req.created_at.clone(),
             status: Status::parse(req.status.as_deref()),
             model: requested_model,
@@ -334,6 +342,14 @@ impl Row {
                 })
                 .unwrap_or(false),
         }
+    }
+
+    /// Stamp the row with the account it was polled from, once the caller
+    /// knows which login produced it.
+    pub fn with_account(mut self, id: &str, name: &str) -> Self {
+        self.account_id = id.to_string();
+        self.account_name = name.to_string();
+        self
     }
 
     /// Cache hit rate over the prompt, mirroring the requests page rule.
@@ -491,6 +507,8 @@ mod tests {
     fn row_with(requested: &str, served: Option<&str>) -> Row {
         Row {
             id: format!("gid://axonhub/Request/1"),
+            account_id: String::new(),
+            account_name: String::new(),
             created_at: None,
             status: Status::Completed,
             model: requested.to_string(),

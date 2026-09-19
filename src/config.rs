@@ -34,7 +34,7 @@ impl CredentialMode {
     /// One-line explanation shown under the selector.
     pub fn hint(self) -> &'static str {
         match self {
-            CredentialMode::None => "每次启动都需要输入密码",
+            CredentialMode::None => "每次启动都需要重新输入访问令牌",
             CredentialMode::Token => "仅加密保存访问令牌,不保存密码;7 天后需重新登录",
             CredentialMode::Password => "加密保存邮箱和密码,自动登录,不会过期",
         }
@@ -73,6 +73,11 @@ pub struct Config {
     /// height. Toggled from the right-click menu; the window is resized to keep
     /// the same row count, so the panel gets shorter rather than denser.
     pub single_line: bool,
+    /// Saved logins. All of them are polled and their requests merged into one
+    /// list; the secrets live in the encrypted blob under the same ids.
+    pub accounts: Vec<Account>,
+    /// (account, channel) pairs whose requests are hidden from the merged list.
+    pub hidden_channels: Vec<HiddenChannel>,
     pub window: WindowState,
 }
 
@@ -118,6 +123,8 @@ impl Default for Config {
             pin_position: false,
             always_on_bottom: false,
             logical_window: true,
+            accounts: Vec::new(),
+            hidden_channels: Vec::new(),
             window: WindowState::default(),
         }
     }
@@ -125,22 +132,102 @@ impl Default for Config {
 
 /// What is written to the encrypted blob. Which fields are populated depends on
 /// the configured mode; unused fields are simply absent.
+///
+/// The single-account fields are the original format. They are still read (and
+/// folded into `accounts` on load) so an install from before multiple accounts
+/// keeps its token, and they are written as empty so a fresh file carries only
+/// the account list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Stored {
     /// Kept in every mode that stores anything, so the sign-in form can be
     /// prefilled after the token expires.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// Secrets per account, keyed by `Account::id`.
+    pub accounts: Vec<StoredAccount>,
+}
+
+/// The secrets of one account. Same shape as `Stored`, minus the list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StoredAccount {
+    pub id: String,
+    pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
 
+/// One saved AxonHub login. Non-secret: the token lives in the encrypted blob
+/// under the same `id`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Account {
+    pub id: String,
+    /// Label the user typed when adding the account.
+    pub name: String,
+    pub endpoint: String,
+    pub project_id: String,
+}
+
+/// A channel of one account whose requests the panel does not show.
+///
+/// AxonHub chains accounts: a channel of account A can forward a request to
+/// account B, and the request is then recorded on both sides — the same call
+/// shows up twice in a merged list. Hiding one side's channel removes the
+/// duplicate without changing anything on either server.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HiddenChannel {
+    pub account_id: String,
+    pub channel: String,
+}
+
 impl Stored {
-    pub fn credentials(&self) -> Option<Credentials> {
-        Some(Credentials {
-            email: self.email.clone(),
-            password: self.password.clone()?,
-        })
+    /// Secrets for one account, if any were stored.
+    pub fn account(&self, id: &str) -> Option<&StoredAccount> {
+        self.accounts.iter().find(|a| a.id == id)
+    }
+
+    /// The stored token for one account.
+    pub fn token_for(&self, id: &str) -> Option<String> {
+        self.account(id).and_then(|a| a.token.clone())
+    }
+
+    /// Insert or replace one account's entry, keeping the list ordered by id of
+    /// arrival (the newest account is appended).
+    pub fn put_account(&mut self, entry: StoredAccount) {
+        match self.accounts.iter_mut().find(|a| a.id == entry.id) {
+            Some(slot) => *slot = entry,
+            None => self.accounts.push(entry),
+        }
+    }
+
+    /// Store a token for an account, creating its entry if needed. An empty
+    /// token clears it instead.
+    pub fn set_token(&mut self, id: &str, token: &str) {
+        let entry = match self.accounts.iter_mut().find(|a| a.id == id) {
+            Some(slot) => slot,
+            None => {
+                self.accounts.push(StoredAccount {
+                    id: id.to_string(),
+                    ..Default::default()
+                });
+                self.accounts.last_mut().expect("just pushed")
+            }
+        };
+        entry.token = (!token.is_empty()).then(|| token.to_string());
+    }
+
+    /// Forget one account's secrets.
+    pub fn forget_account(&mut self, id: &str) {
+        self.accounts.retain(|a| a.id != id);
     }
 }
 
@@ -267,18 +354,108 @@ impl Config {
         }
     }
 
-    pub fn graphql_url(&self) -> String {
-        format!("{}/admin/graphql", self.endpoint.trim_end_matches('/'))
-    }
-
-    pub fn signin_url(&self) -> String {
-        format!("{}/admin/auth/signin", self.endpoint.trim_end_matches('/'))
-    }
-
     /// Persist exactly what the current mode allows, dropping anything else so a
     /// mode change cannot leave stale secrets behind.
     pub fn store(&self, stored: &Stored) {
         store_in(&base_dir(), self.credential_mode, stored);
+    }
+
+    /// The saved account with this id.
+    pub fn account(&self, id: &str) -> Option<&Account> {
+        self.accounts.iter().find(|a| a.id == id)
+    }
+
+    /// Insert or replace an account, keeping the list in arrival order.
+    pub fn upsert_account(&mut self, account: Account) {
+        match self.accounts.iter_mut().find(|a| a.id == account.id) {
+            Some(slot) => *slot = account,
+            None => self.accounts.push(account),
+        }
+    }
+
+    /// Drop one account's metadata.
+    pub fn remove_account(&mut self, id: &str) {
+        self.accounts.retain(|a| a.id != id);
+    }
+
+    /// An id no account is using, derived from the account's name.
+    pub fn fresh_account_id(&self) -> String {
+        let mut n = self.accounts.len() + 1;
+        loop {
+            let id = format!("a{n}");
+            if self.account(&id).is_none() {
+                return id;
+            }
+            n += 1;
+        }
+    }
+
+    /// Whether one account's channel is hidden from the merged list.
+    pub fn hides_channel(&self, account_id: &str, channel: &str) -> bool {
+        self.hidden_channels
+            .iter()
+            .any(|h| h.account_id == account_id && h.channel == channel)
+    }
+
+    /// Hide a channel, or show it again if it was already hidden.
+    pub fn toggle_hidden_channel(&mut self, account_id: &str, channel: &str) {
+        let entry = HiddenChannel {
+            account_id: account_id.to_string(),
+            channel: channel.to_string(),
+        };
+        match self.hidden_channels.iter().position(|h| *h == entry) {
+            Some(index) => {
+                self.hidden_channels.remove(index);
+            }
+            None => self.hidden_channels.push(entry),
+        }
+    }
+}
+
+/// Fold the single-account credentials of an older install into the account
+/// list, so the token that was already on disk keeps working. Returns whether
+/// anything changed and therefore needs saving.
+pub fn migrate_single_account(config: &mut Config, stored: &mut Stored) -> bool {
+    if !config.accounts.is_empty() {
+        return false;
+    }
+    let token = stored.token.take();
+    let email = std::mem::take(&mut stored.email);
+    let password = stored.password.take();
+    if token.is_none() && password.is_none() {
+        return false;
+    }
+    let name = if email.is_empty() {
+        endpoint_host(&config.endpoint)
+    } else {
+        email.clone()
+    };
+    let id = "a1".to_string();
+    config.upsert_account(Account {
+        id: id.clone(),
+        name,
+        endpoint: config.endpoint.clone(),
+        project_id: config.project_id.clone(),
+    });
+    stored.put_account(StoredAccount {
+        id,
+        email,
+        password,
+        token,
+    });
+    true
+}
+
+/// The host part of an endpoint URL, for naming an account the user has not
+/// named themselves. Falls back to the whole string when it is not a URL.
+pub fn endpoint_host(endpoint: &str) -> String {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    let after_scheme = trimmed.split("://").last().unwrap_or(trimmed);
+    let host = after_scheme.split('/').next().unwrap_or(after_scheme);
+    if host.is_empty() {
+        trimmed.to_string()
+    } else {
+        host.to_string()
     }
 }
 
@@ -334,11 +511,16 @@ fn unix_now() -> u64 {
 fn filtered(mode: CredentialMode, stored: &Stored) -> Option<Stored> {
     match mode {
         CredentialMode::None => None,
-        CredentialMode::Token => Some(Stored {
-            email: stored.email.clone(),
-            password: None,
-            token: stored.token.clone(),
-        }),
+        CredentialMode::Token => {
+            // Tokens only: a password is never written in this mode, not even
+            // for an account that signed in with one.
+            let mut record = stored.clone();
+            record.password = None;
+            for account in &mut record.accounts {
+                account.password = None;
+            }
+            Some(record)
+        }
         CredentialMode::Password => Some(stored.clone()),
     }
 }
@@ -352,7 +534,13 @@ fn store_in(dir: &Path, mode: CredentialMode, stored: &Stored) {
         clear_stored_in(dir);
         return;
     };
-    if record.token.is_none() && record.password.is_none() {
+    let empty = record.token.is_none()
+        && record.password.is_none()
+        && record
+            .accounts
+            .iter()
+            .all(|a| a.token.is_none() && a.password.is_none());
+    if empty {
         // Nothing worth keeping; do not leave an empty blob around.
         clear_stored_in(dir);
         return;
@@ -559,6 +747,7 @@ mod tests {
             email: "a@b".into(),
             password: Some("secret".into()),
             token: Some("tok".into()),
+            accounts: Vec::new(),
         }
     }
 
@@ -617,6 +806,7 @@ mod tests {
                 email: String::new(),
                 password: None,
                 token: None,
+                accounts: Vec::new(),
             },
         );
         assert!(dir.load().is_none());

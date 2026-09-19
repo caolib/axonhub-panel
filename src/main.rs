@@ -22,10 +22,10 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, CreateSolidBrush,
-    DeleteDC, DeleteObject, EndPaint, FillRect, GetDeviceCaps, GetMonitorInfoW, HDC, HGDIOBJ,
-    HORZSIZE, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW,
-    MonitorFromPoint, MonitorFromRect, MonitorFromWindow, PAINTSTRUCT, SRCCOPY, SelectObject,
-    VERTSIZE,
+    DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetDeviceCaps, GetMonitorInfoW, HDC,
+    HGDIOBJ, HORZSIZE, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW,
+    MonitorFromPoint, MonitorFromRect, MonitorFromWindow, PAINTSTRUCT, ReleaseDC, SRCCOPY,
+    SelectObject, VERTSIZE,
 };
 use windows::Win32::Graphics::GdiPlus::{
     GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GdiplusStartupOutput,
@@ -34,8 +34,8 @@ use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SetFocus, VK_A, VK_C, VK_CONTROL, VK_DOWN, VK_END, VK_HOME, VK_NEXT, VK_PRIOR,
-    VK_UP, VK_V, VK_X,
+    GetKeyState, SetFocus, VK_A, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_LEFT,
+    VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_UP, VK_V, VK_X,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_BACK, VK_ESCAPE, VK_RETURN, VK_TAB,
@@ -46,15 +46,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use app::{App, View};
-use config::{Config, CredentialMode, Credentials, Stored, WindowState};
+use app::{App, LoginTarget, View};
+use config::{Account, Config, CredentialMode, Credentials, Stored, WindowState};
 use theme::{Fonts, Painter};
 use time::now_unix;
 use ui::detail::{self, Button};
 use ui::layout::Metrics;
 use ui::login::{self, Action as LoginAction, Field, Method};
 use ui::panel::{self, ListView};
-use worker::{Command, Update, Worker};
+use worker::{Command, Target, Update, Worker};
 
 const CLASS_NAME: &str = "AHPanelWindow";
 /// The error-detail popup's class. A second window rather than an overlay: the
@@ -89,6 +89,14 @@ const TIMER_CLOCK: usize = 3;
 fn ctrl_down() -> bool {
     unsafe { GetKeyState(VK_CONTROL.0 as i32) < 0 }
 }
+
+/// Whether Shift is held, which extends the sign-in form's selection.
+fn shift_down() -> bool {
+    unsafe { GetKeyState(VK_SHIFT.0 as i32) < 0 }
+}
+
+/// Left button still down during a mouse move, i.e. a drag rather than a hover.
+const MK_LBUTTON: usize = 0x0001;
 
 /// Keep the scroll offset inside the range the current viewport allows.
 fn clamp_scroll(hwnd: HWND) {
@@ -204,6 +212,17 @@ const MENU_SINGLE_LINE: usize = 1204;
 /// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` = 24 px.
 const MENU_FONT_BASE: usize = 1500;
 const MENU_FONT_MAX: usize = MENU_FONT_BASE + 14;
+/// Add a second (or third…) login to the merged list.
+const MENU_ADD_ACCOUNT: usize = 1102;
+/// Per-account items: `MENU_ACCOUNT_BASE + i` opens account `i`'s form, and
+/// `MENU_ACCOUNT_DELETE_BASE + i` removes it. The ranges must not overlap.
+const MENU_ACCOUNT_BASE: usize = 1600;
+const MENU_ACCOUNT_DELETE_BASE: usize = 1700;
+/// Channel-filter items: `MENU_CHANNEL_BASE + i` toggles the i-th pair.
+const MENU_CHANNEL_BASE: usize = 1800;
+const MENU_CHANNEL_CLEAR: usize = 1799;
+/// Upper bound of the per-item ranges, so an id can be recognised by range.
+const MENU_RANGE_MAX: usize = 64;
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -241,6 +260,9 @@ struct State {
     /// Whether the window currently lacks `WS_EX_NOACTIVATE`, i.e. can take
     /// keyboard focus. Mirrors `app.is_login()`.
     activatable: bool,
+    /// Whether a mouse drag inside the sign-in form is in progress, i.e. the
+    /// button went down on a field and has not been released yet.
+    login_drag: bool,
     /// Draw scale (monitor physical density × `config.fontSize` / 12.5) the
     /// `fonts` were built for. Tracked so a monitor change can tell how much
     /// to grow the window: the panel's size is the same in logical units on
@@ -505,40 +527,65 @@ fn main() {
             return;
         }
 
-        let config = Config::load();
-        let stored = config::load_stored();
+        let mut config = Config::load();
+        let mut stored = config::load_stored().unwrap_or_default();
 
-        // Startup precedence for credentials:
-        //   1. a token in the configured environment variable (nothing on disk),
-        //   2. a stored token,
-        //   3. stored email+password, exchanged for a token,
-        //   4. the sign-in form.
+        // An install from before multiple accounts carries one token in the
+        // blob; fold it into the account list so it keeps working.
+        if config::migrate_single_account(&mut config, &mut stored) {
+            config.save();
+            config.store(&stored);
+        }
+
+        // The environment variable is a single token, so it stands in for the
+        // first account: exporting a fresh token is how a headless setup
+        // refreshes one of them. With no accounts at all it also names the
+        // account, from the endpoint it points at.
         let env_token = config::token_from_env(&config.token_env_var);
-        let stored_token = stored.as_ref().and_then(|s| s.token.clone());
-        let startup_token = env_token
-            .clone()
-            .or_else(|| stored_token.clone())
-            .filter(|t| !token::is_expired(t, now_unix()));
+        if let Some(token) = &env_token {
+            match config.accounts.first_mut() {
+                Some(first) => {
+                    let id = first.id.clone();
+                    stored.set_token(&id, token);
+                }
+                None => {
+                    let id = "a1".to_string();
+                    config.upsert_account(Account {
+                        id: id.clone(),
+                        name: config::endpoint_host(&config.endpoint),
+                        endpoint: config.endpoint.clone(),
+                        project_id: config.project_id.clone(),
+                    });
+                    stored.set_token(&id, token);
+                    config.save();
+                }
+            }
+            config.store(&stored);
+        }
+
+        let targets = targets_from(&config, &stored);
 
         // An expired token is a routine event (AxonHub issues 7-day tokens with
         // no refresh), so say so rather than letting the first poll 401.
-        let expired_notice = startup_token
-            .is_none()
-            .then(|| {
-                env_token
-                    .as_ref()
-                    .or(stored_token.as_ref())
-                    .filter(|t| token::is_expired(t, now_unix()))
-                    .map(|t| {
-                        format!(
-                            "访问令牌已过期({}),请重新获取",
-                            token::describe(t, now_unix())
-                        )
-                    })
+        let expired_notice = config
+            .accounts
+            .iter()
+            .find(|a| {
+                stored
+                    .token_for(&a.id)
+                    .is_some_and(|t| token::is_expired(&t, now_unix()))
             })
-            .flatten();
+            .and_then(|a| {
+                stored.token_for(&a.id).map(|t| {
+                    format!(
+                        "账号 {} 的访问令牌已过期({}),请重新获取",
+                        a.name,
+                        token::describe(&t, now_unix())
+                    )
+                })
+            });
 
-        let worker = Worker::spawn(config.clone(), startup_token.clone());
+        let worker = Worker::spawn(config.clone(), targets.clone());
 
         let Ok(instance) = windows::Win32::System::LibraryLoader::GetModuleHandleW(None) else {
             return;
@@ -567,26 +614,17 @@ fn main() {
         };
         RegisterClassW(&detail_wc);
 
-        let prefill = stored.as_ref().and_then(|s| s.credentials());
-        let mut app = App::new(config.clone(), startup_token, prefill.clone());
-
-        if app.token.is_none() {
-            // No usable token: collect one, either by signing in with stored
-            // credentials or by showing the form.
-            match prefill {
-                Some(creds) => {
-                    if let Some(form) = app.login.as_mut() {
-                        // A sign-in is already in flight for these credentials.
-                        form.busy = true;
-                    }
-                    worker.send(Command::SignIn { creds });
-                }
-                None => {
-                    if let Some(form) = app.login.as_mut() {
-                        form.error = expired_notice.clone();
-                    }
-                }
-            }
+        let mut app = App::new(config.clone());
+        app.stored = stored.clone();
+        if !targets.iter().any(|t| t.token.is_some()) {
+            // No account can be polled: collect a token. An existing account is
+            // re-signed-in from its own form; a fresh install starts on a new
+            // one.
+            let target = match config.accounts.first() {
+                Some(account) => LoginTarget::Account(account.id.clone()),
+                None => LoginTarget::Add,
+            };
+            app.open_login(expired_notice.clone(), target);
         }
 
         // The sign-in form needs the keyboard; the request list deliberately
@@ -598,6 +636,7 @@ fn main() {
             fonts: Fonts::load(1.0),
             detail: None,
             activatable: wants_focus,
+            login_drag: false,
             scale: 1.0,
         };
         STATE.with(|s| *s.borrow_mut() = Some(state));
@@ -987,13 +1026,27 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             .with_single_line(single_line_mode());
             let local_x = (cursor.x - rc.left) as f32;
             let local_y = (cursor.y - rc.top) as f32;
+            // The sign-in form's text rows are the one place where the pointer
+            // means "put the caret here", so they get the I-beam.
+            let over_text = State::with(|s| {
+                s.app.is_login()
+                    && s.app
+                        .login
+                        .as_ref()
+                        .is_some_and(|f| login::hit_text_field(f, m, local_x, local_y))
+            })
+            .unwrap_or(false);
             let pinned = State::with(|s| s.app.config.pin_position).unwrap_or(false);
-            let shape = match edge_at(m, local_x, local_y) {
-                Some(edge) => edge.cursor_id(),
-                // The hand signals "this is clickable"; pinned mode is not, so
-                // show an arrow even where `hit_test` reports `HTCLIENT`.
-                None if !pinned && hit_test(m, local_x, local_y) == HTCLIENT as isize => IDC_HAND,
-                None => IDC_ARROW,
+            let shape = if over_text {
+                IDC_IBEAM
+            } else {
+                match edge_at(m, local_x, local_y) {
+                    Some(edge) => edge.cursor_id(),
+                    // The hand signals "this is clickable"; pinned mode is not,
+                    // so show an arrow even where `hit_test` reports `HTCLIENT`.
+                    None if !pinned && hit_test(m, local_x, local_y) == HTCLIENT as isize => IDC_HAND,
+                    None => IDC_ARROW,
+                }
             };
             if let Ok(handle) = unsafe { LoadCursorW(None, shape) } {
                 unsafe {
@@ -1089,7 +1142,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_ERASEBKGND => {}
         WM_TIMER => on_timer(hwnd, wp.0, &mut actions),
-        WM_MOUSEMOVE => on_mouse_move(hwnd, lp, &mut actions),
+        WM_MOUSEMOVE => on_mouse_move(hwnd, wp, lp, &mut actions),
         WM_MOUSELEAVE => {
             let changed = State::with(|s| {
                 let had = s.app.hover.is_some();
@@ -1214,8 +1267,10 @@ enum Action {
     SetTopmost(bool),
     /// Pin the window to the bottom of the Z order; mutually exclusive with topmost.
     SetBottom(bool),
-    /// Re-read credentials from disk to prefill the form.
-    OpenLogin(Option<String>),
+    /// Show the sign-in form: for a new account, or for the one being named.
+    OpenLogin(Option<String>, LoginTarget),
+    /// Forget one saved account and its stored secrets.
+    RemoveAccount(String),
     /// The window was resized by hand; fetch this many rows.
     RefreshRowCount(usize),
     /// Change the row count from the menu and resize the window to fit.
@@ -1241,6 +1296,11 @@ enum Action {
     Paste,
     /// Clear the focused sign-in field.
     ClearField,
+    /// Put the form's selection on the clipboard.
+    CopySelection,
+    /// Cut the form's selection: copy it, then remove it. With no selection
+    /// this clears the field, which is what the old Ctrl+X did.
+    CutSelection,
 }
 
 fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
@@ -1401,15 +1461,61 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 });
                 invalidate(hwnd);
             }
+            Action::CopySelection => {
+                let text = State::with(|s| {
+                    s.app
+                        .login
+                        .as_ref()
+                        .and_then(|form| form.selected_text())
+                })
+                .flatten();
+                if let Some(text) = text {
+                    set_clipboard_text(&text);
+                }
+            }
+            Action::CutSelection => {
+                let cut = State::with(|s| {
+                    s.app
+                        .login
+                        .as_mut()
+                        .and_then(|form| form.take_selection())
+                })
+                .flatten();
+                match cut {
+                    Some(text) => set_clipboard_text(&text),
+                    // Nothing selected: Ctrl+X keeps its old meaning of
+                    // "replace this value".
+                    None => actions.push(Action::ClearField),
+                }
+                invalidate(hwnd);
+            }
             Action::SetActivatable(enabled) => {
                 apply_activation(hwnd, enabled);
                 State::with(|s| s.activatable = enabled);
             }
-            Action::OpenLogin(message) => {
-                // Prefill from the stored blob when present; a user switching
-                // accounts simply overwrites the fields.
-                let prefill = config::load_stored().and_then(|s| s.credentials());
-                State::with(|s| s.app.open_login(message, prefill));
+            Action::OpenLogin(message, target) => {
+                State::with(|s| s.app.open_login(message, target));
+                sync_activation(&mut actions);
+                invalidate(hwnd);
+            }
+            Action::RemoveAccount(id) => {
+                State::with(|s| {
+                    s.app.config.remove_account(&id);
+                    s.app.accounts = s.app.config.accounts.clone();
+                    let mut stored = s.app.stored.clone();
+                    stored.forget_account(&id);
+                    s.app.stored = stored;
+                    s.app.config.store(&s.app.stored.clone());
+                    s.app.save();
+                    send_targets(s);
+                    // Deleting the last account leaves nothing to poll, so the
+                    // form comes back up for a new one.
+                    if s.app.accounts.is_empty() {
+                        s.app.open_login(Some("已删除账号,请添加一个".into()), LoginTarget::Add);
+                    } else {
+                        s.app.status = Some(("已删除账号".into(), false));
+                    }
+                });
                 sync_activation(&mut actions);
                 invalidate(hwnd);
             }
@@ -1438,16 +1544,17 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
             Action::CopyDetail => copy_detail_text(),
             Action::ClearCredentials => {
                 config::clear_stored();
-                // Reopen on the token tab, since a cleared credential is
-                // usually followed by pasting a fresh token.
+                // The accounts keep their names and endpoints — only the
+                // secrets go — so the menu still lists them and each can be
+                // signed in again with a fresh token.
                 State::with(|s| {
-                    s.app.token = None;
                     s.app.stored = Stored::default();
-                    s.worker.send(Command::SetToken(String::new()));
-                    s.app.open_login(Some("已清除本机保存的凭据".into()), None);
-                    if let Some(form) = s.app.login.take() {
-                        s.app.login = Some(form.with_token(""));
-                    }
+                    send_targets(s);
+                    let target = match s.app.accounts.first() {
+                        Some(account) => LoginTarget::Account(account.id.clone()),
+                        None => LoginTarget::Add,
+                    };
+                    s.app.open_login(Some("已清除本机保存的凭据".into()), target);
                 });
                 sync_activation(&mut actions);
                 invalidate(hwnd);
@@ -1553,6 +1660,7 @@ fn paint(hwnd: HWND) {
                         selected: s.app.selected,
                         status_text: s.app.status.clone(),
                         user: s.app.user_name.as_deref(),
+                        accounts: &s.app.accounts,
                         pinned: s.app.config.pin_position,
                         filter: s.app.filter,
                     };
@@ -1615,8 +1723,7 @@ fn pump_worker(actions: &mut Vec<Action>) {
                 other => rest.push(other),
             }
         }
-        let worker = &s.worker;
-        s.app.apply_updates(rest, worker);
+        s.app.apply_updates(rest);
         popup = s.detail.as_ref().map(|p| p.hwnd);
         true
     });
@@ -1701,10 +1808,37 @@ fn apply_activation(hwnd: HWND, enabled: bool) {
     }
 }
 
-fn on_mouse_move(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
+fn on_mouse_move(hwnd: HWND, wp: WPARAM, lp: LPARAM, actions: &mut Vec<Action>) {
     let x = (lp.0 & 0xFFFF) as i16 as f32;
     let y = ((lp.0 >> 16) & 0xFFFF) as i16 as f32;
     let m = metrics_for(hwnd);
+
+    // A drag inside the sign-in form extends its selection, the way dragging
+    // over text does anywhere else.
+    let dragging = State::with(|s| s.app.is_login() && s.login_drag).unwrap_or(false);
+    if dragging && wp.0 & MK_LBUTTON != 0 {
+        let hdc = unsafe { GetDC(Some(hwnd)) };
+        if !hdc.is_invalid() {
+            let painter = Painter::new(hdc);
+            let changed = State::with(|s| {
+                let fonts = &s.fonts;
+                let Some(form) = s.app.login.as_mut() else {
+                    return false;
+                };
+                painter
+                    .as_ref()
+                    .is_some_and(|p| login::place_caret(p, fonts, form, m, x, y, false))
+            });
+            drop(painter);
+            unsafe {
+                let _ = ReleaseDC(Some(hwnd), hdc);
+            }
+            if changed == Some(true) {
+                actions.push(Action::Redraw);
+            }
+        }
+        return;
+    }
 
     let mut needs_paint = false;
     State::with(|s| {
@@ -1740,6 +1874,13 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
 
     let mut redraw = false;
 
+    // A GDI+ session to measure text with, so the caret can be placed at the
+    // character under the pointer. One DC and one graphics object per click.
+    let hdc = unsafe { GetDC(Some(hwnd)) };
+    let painter = (!hdc.is_invalid())
+        .then(|| Painter::new(hdc))
+        .flatten();
+
     State::with(|s| {
         if s.app.is_login() {
             let action = s.app.login.as_ref().and_then(|f| login::hit(f, m, x, y));
@@ -1748,10 +1889,13 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
                 Some(LoginAction::Submit) => actions.push(Action::SignIn),
                 Some(LoginAction::CycleMode) => {
                     if let Some(f) = s.app.login.as_mut() {
+                        // Saving a password belongs to the hidden password
+                        // method, so the selector only walks the two modes
+                        // that mean something here. A config left in password
+                        // mode falls back to not storing anything.
                         let next = match f.mode {
                             CredentialMode::None => CredentialMode::Token,
-                            CredentialMode::Token => CredentialMode::Password,
-                            CredentialMode::Password => CredentialMode::None,
+                            _ => CredentialMode::None,
                         };
                         f.set_mode(next);
                     }
@@ -1759,19 +1903,27 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
                 Some(LoginAction::SetMethod(method)) => {
                     if let Some(f) = s.app.login.as_mut() {
                         f.method = method;
-                        f.focus = match method {
+                        f.focus_field(match method {
                             Method::Password => Field::Email,
                             Method::Token => Field::Token,
-                        };
+                        });
                         f.error = None;
-                        f.caret_on = true;
                     }
                 }
                 Some(LoginAction::Focus(field)) => {
+                    // The press both focuses the field and drops the caret
+                    // where it landed; a drag that follows extends the
+                    // selection from there.
                     if let Some(f) = s.app.login.as_mut() {
-                        f.focus = field;
-                        f.caret_on = true;
+                        if let Some(p) = painter.as_ref() {
+                            login::place_caret(p, &s.fonts, f, m, x, y, true);
+                        } else {
+                            f.focus_field(field);
+                        }
                     }
+                    // The button is down on a field: whatever moves next is a
+                    // drag, until it is released.
+                    s.login_drag = true;
                 }
                 None => {}
             }
@@ -1793,6 +1945,13 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
         }
     });
 
+    drop(painter);
+    if !hdc.is_invalid() {
+        unsafe {
+            let _ = ReleaseDC(Some(hwnd), hdc);
+        }
+    }
+
     if redraw {
         actions.push(Action::Redraw);
     }
@@ -1803,6 +1962,22 @@ fn on_left_up(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
     let x = (lp.0 & 0xFFFF) as i16 as f32;
     let y = ((lp.0 >> 16) & 0xFFFF) as i16 as f32;
     let m = metrics_for(hwnd);
+
+    // End a drag on the sign-in form: a press that never moved leaves a
+    // zero-width anchor behind, which has to go.
+    let ended = State::with(|s| {
+        if !s.login_drag {
+            return false;
+        }
+        s.login_drag = false;
+        if let Some(form) = s.app.login.as_mut() {
+            form.collapse_selection();
+        }
+        true
+    });
+    if ended == Some(true) {
+        actions.push(Action::Redraw);
+    }
 
     // Only act if the pointer is still over the card it went down on, so
     // dragging off cancels the action; pinned mode is display-only. Only a card
@@ -1833,9 +2008,34 @@ fn list_view(s: &State) -> ListView<'_> {
         selected: s.app.selected,
         status_text: None,
         user: None,
+        accounts: &s.app.accounts,
         pinned: s.app.config.pin_position,
         filter: s.app.filter,
     }
+}
+
+/// The worker's poll list: one target per saved account, with whatever token
+/// the encrypted blob holds for it.
+fn targets_from(config: &Config, stored: &Stored) -> Vec<Target> {
+    config
+        .accounts
+        .iter()
+        .map(|account| Target {
+            id: account.id.clone(),
+            name: account.name.clone(),
+            endpoint: account.endpoint.clone(),
+            project_id: account.project_id.clone(),
+            token: stored
+                .token_for(&account.id)
+                .filter(|token| !token.is_empty()),
+        })
+        .collect()
+}
+
+/// Hand the worker the current set of accounts and tokens.
+fn send_targets(s: &mut State) {
+    let targets = targets_from(&s.app.config, &s.app.stored);
+    s.worker.send(Command::SetTargets(targets));
 }
 
 fn on_wheel(hwnd: HWND, wp: WPARAM, actions: &mut Vec<Action>) {
@@ -1875,8 +2075,8 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
 
     let vk = wp.0 as u16;
 
-    // Clipboard shortcuts. Handled here because this window draws its own
-    // controls: there is no edit control to implement Ctrl+V for us.
+    // Clipboard and selection shortcuts. Handled here because this window
+    // draws its own controls: there is no edit control to implement them.
     if ctrl_down() && State::with(|s| s.app.is_login() == true).unwrap_or(false) {
         // A plain 'v' arrives as WM_CHAR too, so swallow that one; see below.
         match vk {
@@ -1884,15 +2084,30 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
                 actions.push(Action::Paste);
                 return;
             }
-            // Clear the focused field: the panel has no selection model, so
-            // Ctrl+A and Ctrl+X both mean "replace this value".
-            v if v == VK_A.0 || v == VK_X.0 || v == VK_C.0 => {
-                actions.push(Action::ClearField);
+            v if v == VK_A.0 => {
+                State::with(|s| {
+                    if let Some(form) = s.app.login.as_mut() {
+                        form.select_all();
+                    }
+                });
+                actions.push(Action::Redraw);
+                return;
+            }
+            v if v == VK_C.0 => {
+                actions.push(Action::CopySelection);
+                return;
+            }
+            v if v == VK_X.0 => {
+                actions.push(Action::CutSelection);
                 return;
             }
             _ => {}
         }
     }
+
+    // Arrow keys move the caret; with Shift they drag the selection anchor,
+    // which is what makes the fields behave like edit controls.
+    let extend = shift_down();
 
     let mut quit = false;
     let mut submit = false;
@@ -1903,6 +2118,11 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
             };
             match vk {
                 v if v == VK_BACK.0 => form.backspace(),
+                v if v == VK_DELETE.0 => form.delete_forward(),
+                v if v == VK_LEFT.0 => form.move_caret(-1, extend),
+                v if v == VK_RIGHT.0 => form.move_caret(1, extend),
+                v if v == VK_HOME.0 => form.caret_to_edge(false, extend),
+                v if v == VK_END.0 => form.caret_to_edge(true, extend),
                 v if v == VK_TAB.0 => form.focus_next(false),
                 v if v == VK_RETURN.0 => submit = true,
                 v if v == VK_ESCAPE.0 => quit = true,
@@ -1948,23 +2168,18 @@ fn submit_login(hwnd: HWND) {
         }
         form.busy = true;
         form.error = None;
-        s.app.config.endpoint = form.endpoint.trim().to_string();
-        // #2 登录表单改了 endpoint，必须同步给 worker（否则它仍打旧 endpoint）。
-        s.worker.send(Command::SetEndpoint(s.app.config.endpoint.clone()));
         // The mode chosen in the form is what governs persistence, so it has to
-        // reach the config before `store` consults it. Without this the click on
-        // `凭据:` was cosmetic and the token was dropped on the floor.
+        // reach the config before `store` consults it.
         s.app.config.credential_mode = form.mode;
 
         let submission = match form.method {
             Method::Password => Submission::Password(form.credentials()),
             Method::Token => Submission::Token(form.trimmed_token()),
         };
-        let mode = form.mode;
-        Some((submission, mode))
+        Some(submission)
     });
 
-    let Some((submission, mode)) = prepared.flatten() else {
+    let Some(submission) = prepared.flatten() else {
         invalidate(hwnd);
         return;
     };
@@ -1974,32 +2189,79 @@ fn submit_login(hwnd: HWND) {
             // Remember what to persist once a token comes back; the password is
             // only written when the mode allows it.
             State::with(|s| {
+                let Some((id, _name)) = upsert_form_account(s) else {
+                    return;
+                };
                 s.app.stored.email = creds.email.clone();
                 s.app.stored.password = Some(creds.password.clone());
                 s.app.save();
-                s.worker.send(Command::SignIn { creds });
+                // The account has to exist in the poll list before the answer
+                // lands, or the issued token would have nowhere to go.
+                send_targets(s);
+                s.worker.send(Command::SignIn {
+                    account: id,
+                    creds,
+                });
             });
         }
         Submission::Token(token) => {
             // A pasted token is used directly: no sign-in round trip, and the
             // password never enters the process.
             State::with(|s| {
-                let stored = Stored {
-                    email: String::new(),
-                    password: None,
-                    token: (mode != CredentialMode::None).then(|| token.clone()),
+                let Some((id, name)) = upsert_form_account(s) else {
+                    return;
                 };
+                let mode = s.app.config.credential_mode;
+                let mut stored = s.app.stored.clone();
+                if mode == CredentialMode::None {
+                    // The account still exists for this run; it just leaves
+                    // nothing behind for the next one.
+                    stored.forget_account(&id);
+                } else {
+                    stored.set_token(&id, &token);
+                }
                 s.app.config.store(&stored);
-                s.app.save();
                 s.app.stored = stored;
-                s.app.token = Some(token.clone());
                 s.app.view = View::List;
-                s.app.status = Some(("使用访问令牌".into(), false));
-                s.worker.send(Command::SetToken(token));
+                s.app.status = Some((format!("账号 {name} 已登录"), false));
+                s.app.save();
+                send_targets(s);
             });
         }
     }
     invalidate(hwnd);
+}
+
+/// Create or update the account the sign-in form addresses and return its id
+/// and name. The panel's own endpoint and credential mode follow the form, so
+/// the next "add account" starts where this one left off.
+fn upsert_form_account(s: &mut State) -> Option<(String, String)> {
+    let form = s.app.login.as_ref()?;
+    let name = form.account_name.trim().to_string();
+    let endpoint = form.endpoint.trim().trim_end_matches('/').to_string();
+    let mode = form.mode;
+    let id = match form.editing.clone() {
+        Some(id) => id,
+        None => s.app.config.fresh_account_id(),
+    };
+    // An existing account keeps the project it resolved last time; a new one
+    // starts from the panel's own, which is the common single-project case.
+    let project_id = s
+        .app
+        .config
+        .account(&id)
+        .map(|a| a.project_id.clone())
+        .unwrap_or_else(|| s.app.config.project_id.clone());
+    s.app.config.upsert_account(Account {
+        id: id.clone(),
+        name: name.clone(),
+        endpoint: endpoint.clone(),
+        project_id,
+    });
+    s.app.config.endpoint = endpoint;
+    s.app.config.credential_mode = mode;
+    s.app.accounts = s.app.config.accounts.clone();
+    Some((id, name))
 }
 
 fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
@@ -2038,7 +2300,56 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
             actions.push(Action::OpenUrl(url));
         }
         MENU_CLEAR_CREDS => actions.push(Action::ClearCredentials),
-        MENU_SIGNIN => actions.push(Action::OpenLogin(None)),
+        MENU_SIGNIN => {
+            // The form of the first account, or a new one when there is none.
+            let target = match s.app.accounts.first() {
+                Some(account) => LoginTarget::Account(account.id.clone()),
+                None => LoginTarget::Add,
+            };
+            actions.push(Action::OpenLogin(None, target));
+        }
+        MENU_ADD_ACCOUNT => actions.push(Action::OpenLogin(None, LoginTarget::Add)),
+        MENU_CHANNEL_CLEAR => {
+            s.app.config.hidden_channels.clear();
+            s.app.rebuild();
+            s.app.save();
+            s.app.status = Some(("已清除渠道过滤".into(), false));
+        }
+        _ if (MENU_ACCOUNT_BASE..MENU_ACCOUNT_BASE + MENU_RANGE_MAX).contains(&id) => {
+            // One entry per account, in menu order: sign it in again (or rename
+            // it) by opening its form.
+            if let Some(account) = s.app.accounts.get(id - MENU_ACCOUNT_BASE) {
+                let target = LoginTarget::Account(account.id.clone());
+                actions.push(Action::OpenLogin(None, target));
+            }
+        }
+        _ if (MENU_ACCOUNT_DELETE_BASE..MENU_ACCOUNT_DELETE_BASE + MENU_RANGE_MAX).contains(&id) => {
+            if let Some(account) = s.app.accounts.get(id - MENU_ACCOUNT_DELETE_BASE) {
+                actions.push(Action::RemoveAccount(account.id.clone()));
+            }
+        }
+        _ if (MENU_CHANNEL_BASE..MENU_CHANNEL_BASE + MENU_RANGE_MAX).contains(&id) => {
+            let filters = s.app.channel_filters();
+            if let Some(entry) = filters.get(id - MENU_CHANNEL_BASE) {
+                s.app
+                    .config
+                    .toggle_hidden_channel(&entry.account_id, &entry.channel);
+                let hidden = s
+                    .app
+                    .config
+                    .hides_channel(&entry.account_id, &entry.channel);
+                s.app.rebuild();
+                s.app.save();
+                s.app.status = Some((
+                    format!(
+                        "已{}渠道 {}",
+                        if hidden { "隐藏" } else { "显示" },
+                        entry.channel
+                    ),
+                    false,
+                ));
+            }
+        }
         MENU_QUIT => actions.push(Action::Quit),
         MENU_ROWS_5 => actions.push(Action::ResizeToRows(5)),
         MENU_ROWS_10 => actions.push(Action::ResizeToRows(10)),
@@ -2148,6 +2459,148 @@ fn show_menu(hwnd: HWND) {
         add("打开请求页", MENU_OPEN, false, true);
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+
+        // Accounts: every saved login is polled and their requests merged, so
+        // this submenu is how one is added, edited (a fresh token) or dropped.
+        // A broken account is labelled with what is wrong with it.
+        let accounts: Vec<(String, String)> = State::with(|s| {
+            s.app
+                .accounts
+                .iter()
+                .map(|a| {
+                    let label = match s.app.account_state(&a.id) {
+                        Some(state) => format!("{} · {state}", a.name),
+                        None => a.name.clone(),
+                    };
+                    (a.id.clone(), label)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+        if let Ok(accounts_menu) = CreatePopupMenu() {
+            let mut sub_label = "账号".encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+            for (index, (_, name)) in accounts.iter().enumerate() {
+                let mut wide = label(name);
+                let _ = AppendMenuW(
+                    accounts_menu,
+                    MF_STRING,
+                    MENU_ACCOUNT_BASE + index,
+                    PCWSTR(wide.as_mut_ptr()),
+                );
+            }
+            if !accounts.is_empty() {
+                let _ = AppendMenuW(accounts_menu, MF_SEPARATOR, 0, PCWSTR::null());
+            }
+            let mut add_label = "添加账号…"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>();
+            let _ = AppendMenuW(
+                accounts_menu,
+                MF_STRING,
+                MENU_ADD_ACCOUNT,
+                PCWSTR(add_label.as_mut_ptr()),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | MF_POPUP,
+                accounts_menu.0 as usize,
+                PCWSTR(sub_label.as_mut_ptr()),
+            );
+            let _ = sub_label;
+        }
+
+        // Channel filter: hide one account's channel so a request that account
+        // forwards to another login is not listed twice.
+        let filters = State::with(|s| {
+            let accounts: Vec<(String, String)> = s
+                .app
+                .accounts
+                .iter()
+                .map(|a| (a.id.clone(), a.name.clone()))
+                .collect();
+            s.app
+                .channel_filters()
+                .into_iter()
+                .map(|entry| {
+                    let name = accounts
+                        .iter()
+                        .find(|(id, _)| *id == entry.account_id)
+                        .map(|(_, name)| name.clone())
+                        .unwrap_or_else(|| entry.account_id.clone());
+                    let hidden = s.app.config.hides_channel(&entry.account_id, &entry.channel);
+                    (name, entry, hidden)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+        if !filters.is_empty() {
+            if let Ok(channel_menu) = CreatePopupMenu() {
+                for (index, (name, entry, hidden)) in filters.iter().enumerate() {
+                    let mut wide = label(&format!("{name} · {}", entry.channel));
+                    let mut flags = MF_STRING;
+                    if *hidden {
+                        flags |= MF_CHECKED;
+                    }
+                    let _ = AppendMenuW(
+                        channel_menu,
+                        flags,
+                        MENU_CHANNEL_BASE + index,
+                        PCWSTR(wide.as_mut_ptr()),
+                    );
+                }
+                if filters.iter().any(|(_, _, hidden)| *hidden) {
+                    let _ = AppendMenuW(channel_menu, MF_SEPARATOR, 0, PCWSTR::null());
+                    let mut wide = label("清除渠道过滤");
+                    let _ = AppendMenuW(
+                        channel_menu,
+                        MF_STRING,
+                        MENU_CHANNEL_CLEAR,
+                        PCWSTR(wide.as_mut_ptr()),
+                    );
+                }
+                let mut sub_label = "渠道过滤"
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<u16>>();
+                let _ = AppendMenuW(
+                    menu,
+                    MF_STRING | MF_POPUP,
+                    channel_menu.0 as usize,
+                    PCWSTR(sub_label.as_mut_ptr()),
+                );
+            }
+        }
+
+        // Only meaningful while the list is showing; on the form itself it
+        // would be a no-op that resets what the user has already typed.
+        let on_login = State::with(|s| s.app.is_login()).unwrap_or(false);
+        add("打开登录界面", MENU_SIGNIN, false, !on_login);
+
+        if !accounts.is_empty() {
+            if let Ok(delete_menu) = CreatePopupMenu() {
+                for (index, (_, name)) in accounts.iter().enumerate() {
+                    let mut wide = label(&format!("删除 {name}"));
+                    let _ = AppendMenuW(
+                        delete_menu,
+                        MF_STRING,
+                        MENU_ACCOUNT_DELETE_BASE + index,
+                        PCWSTR(wide.as_mut_ptr()),
+                    );
+                }
+                let mut sub_label = "删除账号"
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<u16>>();
+                let _ = AppendMenuW(
+                    menu,
+                    MF_STRING | MF_POPUP,
+                    delete_menu.0 as usize,
+                    PCWSTR(sub_label.as_mut_ptr()),
+                );
+            }
+        }
+
         add("清除保存的凭据", MENU_CLEAR_CREDS, false, true);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add("固定窗口位置", MENU_PIN_POSITION, pinned, true);
@@ -2346,7 +2799,15 @@ fn open_detail(panel: HWND, index: usize) {
             // Clicking the same card again must not throw the answer away.
             return Some(Next::Focus(open.hwnd));
         }
-        let url = model::request_url(&s.app.config.endpoint, &row.id);
+        // The console link belongs to the server the request came from, which
+        // is not necessarily the panel's own endpoint once accounts differ.
+        let endpoint = s
+            .app
+            .config
+            .account(&row.account_id)
+            .map(|a| a.endpoint.clone())
+            .unwrap_or_else(|| s.app.config.endpoint.clone());
+        let url = model::request_url(&endpoint, &row.id);
         let existing = s.detail.as_ref().map(|p| p.hwnd);
         Some(Next::Load(existing, Box::new(row), url, s.scale))
     })
@@ -2372,6 +2833,7 @@ fn open_detail(panel: HWND, index: usize) {
                 },
             };
             let id = row.id.clone();
+            let account = row.account_id.clone();
             State::with(|s| {
                 s.detail = Some(DetailPopup {
                     hwnd,
@@ -2385,7 +2847,12 @@ fn open_detail(panel: HWND, index: usize) {
                     content_h: 0.0,
                     hover: None,
                 });
-                s.worker.send(Command::FetchDetail(id));
+                // The request has to be fetched from the account that listed
+                // it: another account on another server cannot see it.
+                s.worker.send(Command::FetchDetail {
+                    account,
+                    id,
+                });
             });
             unsafe {
                 let _ = ShowWindow(hwnd, SW_SHOW);

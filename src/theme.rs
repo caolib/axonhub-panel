@@ -22,6 +22,16 @@ pub const TEXT_DIM: u32 = 0xFF8B_94A0;
 pub const TEXT_FAINT: u32 = 0xFF5F_6773;
 pub const SEPARATOR: u32 = 0xFF20_242B;
 pub const MAUVE: u32 = 0xFFC4_A0E0;
+/// Text inputs read as wells: a fill below the card and a border bright enough
+/// to find at a glance.
+pub const INPUT_BG: u32 = 0xFF0D_1016;
+pub const INPUT_BORDER: u32 = 0xFF34_3C4A;
+/// Selected tab: a raised surface with the accent border. Unused while the
+/// method tabs are hidden, kept for when the password method returns.
+#[allow(dead_code)]
+pub const TAB_ON: u32 = 0xFF2E_3745;
+/// Highlight behind selected text; translucent so the glyphs stay readable.
+pub const SELECTION: u32 = 0x59_C4_A0_E0;
 /// Default colour for model names in the card palette.
 pub const ORANGE: u32 = 0xFFD9_7757;
 
@@ -54,7 +64,9 @@ const SMOOTH_ANTIALIAS: SmoothingMode = SmoothingMode(4);
 const TEXT_CLEARTYPE: TextRenderingHint = TextRenderingHint(5);
 const OFFSET_HALF: PixelOffsetMode = PixelOffsetMode(4);
 const TRIM_ELLIPSIS: StringTrimming = StringTrimming(3);
-const LINE_ALIGN_TOP: StringAlignment = StringAlignment(0);
+/// Vertical placement of a line inside its layout rectangle. Centring is what
+/// keeps text centred in controls taller than one line — buttons, inputs, tabs.
+const LINE_ALIGN_CENTER: StringAlignment = StringAlignment(1);
 const NO_WRAP: i32 = 0x1000;
 
 pub const ALIGN_NEAR: u32 = 0;
@@ -321,8 +333,13 @@ impl Painter {
             let face = if cjk { font.cjk } else { font.latin };
             let run_w = self.measure(face, text);
             // Each run is drawn left-aligned at its own offset; the shared
-            // rectangle height keeps all runs on one baseline.
-            self.text(face, text, cursor, y, run_w.max(1.0), h, color, ALIGN_NEAR);
+            // rectangle height keeps all runs on one baseline. The cell runs to
+            // the end of the box rather than stopping at the measured width:
+            // `MeasureString` ignores trailing spaces, so a run ending in one
+            // ("AxonHub ") would otherwise be squeezed into a too-narrow
+            // rectangle and trimmed to "AxonHu…" despite fitting easily.
+            let avail = (x + w - cursor).max(1.0);
+            self.text(face, text, cursor, y, avail, h, color, ALIGN_NEAR);
             cursor += run_w;
         }
         self.reset_clip();
@@ -367,7 +384,7 @@ impl Painter {
             let mut fmt: *mut GpStringFormat = std::ptr::null_mut();
             GdipCreateStringFormat(0, 0, &mut fmt);
             GdipSetStringFormatAlign(fmt, StringAlignment(align as i32));
-            GdipSetStringFormatLineAlign(fmt, LINE_ALIGN_TOP);
+            GdipSetStringFormatLineAlign(fmt, LINE_ALIGN_CENTER);
             GdipSetStringFormatTrimming(fmt, TRIM_ELLIPSIS);
             GdipSetStringFormatFlags(fmt, NO_WRAP);
 
