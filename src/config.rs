@@ -69,6 +69,8 @@ pub struct Config {
     /// reads. Adjustable from the right-click menu (10–24) and clamped to that
     /// range on load.
     pub font_size: f32,
+    /// Installed font family; empty uses the built-in fallback chain.
+    pub font_family: String,
     /// Draw every card as a single line instead of two, halving the card
     /// height. Toggled from the right-click menu; the window is resized to keep
     /// the same row count, so the panel gets shorter rather than denser.
@@ -118,6 +120,7 @@ impl Default for Config {
             credential_mode: CredentialMode::Token,
             token_env_var: "AXONHUB_ACCESS_TOKEN".into(),
             font_size: 12.5,
+            font_family: String::new(),
             single_line: false,
             always_on_top: true,
             pin_position: false,

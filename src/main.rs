@@ -6,7 +6,10 @@ mod app;
 mod client;
 mod config;
 mod format;
+mod font_catalog;
 mod model;
+mod popup;
+mod settings_window;
 mod theme;
 mod time;
 mod token;
@@ -125,7 +128,7 @@ fn sync_scale(hwnd: HWND) {
         return;
     }
     State::with(|s| {
-        s.fonts = Fonts::load(scale);
+        s.fonts = Fonts::load(scale, &s.app.config.font_family);
         s.scale = scale;
     });
 
@@ -196,10 +199,9 @@ fn current_visible_rows(hwnd: HWND) -> usize {
 
 /// Context-menu command ids.
 const MENU_REFRESH: usize = 1001;
-const MENU_SIGNIN: usize = 1100;
+const MENU_SETTINGS: usize = 1002;
 const MENU_OPEN: usize = 1101;
 const MENU_TOPMOST: usize = 1200;
-const MENU_CLEAR_CREDS: usize = 1201;
 const MENU_PIN_POSITION: usize = 1202;
 const MENU_BOTTOMMOST: usize = 1203;
 const MENU_ROWS_5: usize = 1400;
@@ -212,17 +214,6 @@ const MENU_SINGLE_LINE: usize = 1204;
 /// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` = 24 px.
 const MENU_FONT_BASE: usize = 1500;
 const MENU_FONT_MAX: usize = MENU_FONT_BASE + 14;
-/// Add a second (or third…) login to the merged list.
-const MENU_ADD_ACCOUNT: usize = 1102;
-/// Per-account items: `MENU_ACCOUNT_BASE + i` opens account `i`'s form, and
-/// `MENU_ACCOUNT_DELETE_BASE + i` removes it. The ranges must not overlap.
-const MENU_ACCOUNT_BASE: usize = 1600;
-const MENU_ACCOUNT_DELETE_BASE: usize = 1700;
-/// Channel-filter items: `MENU_CHANNEL_BASE + i` toggles the i-th pair.
-const MENU_CHANNEL_BASE: usize = 1800;
-const MENU_CHANNEL_CLEAR: usize = 1799;
-/// Upper bound of the per-item ranges, so an id can be recognised by range.
-const MENU_RANGE_MAX: usize = 64;
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -257,6 +248,8 @@ struct State {
     worker: Worker,
     fonts: Fonts,
     detail: Option<DetailPopup>,
+    settings: Option<settings_window::Popup>,
+    settings_login: Option<settings_window::LoginReturn>,
     /// Whether the window currently lacks `WS_EX_NOACTIVATE`, i.e. can take
     /// keyboard focus. Mirrors `app.is_login()`.
     activatable: bool,
@@ -369,7 +362,8 @@ fn hit_test(m: Metrics, x: f32, y: f32) -> isize {
             // exception, since there the reason is one click away. The header
             // filter chips are clickable too.
             let view = list_view(s);
-            panel::hit_filter(m, &view, x, y).is_some()
+            panel::settings_button(m).contains(x, y)
+                || panel::hit_filter(m, &view, x, y).is_some()
                 || panel::hit_error_row(m, &view, x, y).is_some()
         }
     })
@@ -633,8 +627,10 @@ fn main() {
         let state = State {
             app,
             worker,
-            fonts: Fonts::load(1.0),
+            fonts: Fonts::load(1.0, &config.font_family),
             detail: None,
+            settings: None,
+            settings_login: None,
             activatable: wants_focus,
             login_drag: false,
             scale: 1.0,
@@ -700,7 +696,7 @@ fn main() {
         // monitor the window actually landed on.
         let scale = window_scale(hwnd);
         State::with(|s| {
-            s.fonts = Fonts::load(scale);
+            s.fonts = Fonts::load(scale, &s.app.config.font_family);
             s.scale = scale;
         });
 
@@ -1075,6 +1071,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             // for the one it was just dragged onto; make it fit before deriving
             // the row count from its height.
             fit_window_to_work_area(hwnd);
+            // The account form has a temporary working size; moving/resizing
+            // it must not turn that height into a new request-count setting.
+            if State::with(|s| s.settings_login.is_some()).unwrap_or(false) {
+                save_window_state(hwnd);
+                return LRESULT(0);
+            }
             // A manual resize changes how many rows fit; remember it and refetch
             // exactly that many so the list fills the window without overflow.
             let rows = current_visible_rows(hwnd);
@@ -1127,7 +1129,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 // Keep the panel pinned to the bottom of the Z order when
                 // enabled: any attempt to raise it is redirected to HWND_BOTTOM
                 // so it never floats above other windows.
-                if State::with(|s| s.app.config.always_on_bottom).unwrap_or(false) {
+                if State::with(|s| s.app.config.always_on_bottom && !s.app.is_login())
+                    .unwrap_or(false)
+                {
                     unsafe {
                         (*wp).hwndInsertAfter = HWND_BOTTOM;
                     }
@@ -1174,7 +1178,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 1.0
             };
             State::with(|s| {
-                s.fonts = Fonts::load(scale);
+                s.fonts = Fonts::load(scale, &s.app.config.font_family);
                 s.scale = scale;
             });
 
@@ -1232,6 +1236,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_CLOSE => actions.push(Action::Quit),
         WM_DESTROY => {
             save_window_state(hwnd);
+            if let Some(popup) = State::with(|s| s.settings.as_ref().map(|p| p.hwnd)).flatten() {
+                unsafe {
+                    let _ = DestroyWindow(popup);
+                }
+            }
             // Owned windows go down with their owner anyway; closing the popup
             // here keeps the teardown explicit and its state cleanup ordered.
             if let Some(popup) = State::with(|s| s.detail.take().map(|p| p.hwnd)).flatten() {
@@ -1260,6 +1269,8 @@ enum Action {
     /// State must be written to disk (after a drag or a settings change).
     Save,
     ShowMenu,
+    ShowSettings(POINT),
+    ReturnToSettings,
     /// Sign in with the credentials currently in the form.
     SignIn,
     OpenUrl(String),
@@ -1267,8 +1278,6 @@ enum Action {
     SetTopmost(bool),
     /// Pin the window to the bottom of the Z order; mutually exclusive with topmost.
     SetBottom(bool),
-    /// Show the sign-in form: for a new account, or for the one being named.
-    OpenLogin(Option<String>, LoginTarget),
     /// Forget one saved account and its stored secrets.
     RemoveAccount(String),
     /// The window was resized by hand; fetch this many rows.
@@ -1278,13 +1287,14 @@ enum Action {
     /// Change the body font size from the menu and refit the window; the whole
     /// panel scales with it.
     SetFontSize(f32),
+    SetFontFamily(String),
     /// Switch between the two-line and single-line card layouts. The row count
     /// is kept and the window height refitted to match.
     SetSingleLine(bool),
     /// Toggle `WS_EX_NOACTIVATE` so the window can (or cannot) take focus.
     SetActivatable(bool),
     /// Open the error-detail popup for a row of the list.
-    ShowDetail(usize),
+    ShowDetail(usize, POINT),
     /// Switch the open detail document between compact and full.
     ToggleDetail,
     /// Close the window whose own proc raised this action.
@@ -1314,6 +1324,14 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
             },
             Action::Save => save_window_state(hwnd),
             Action::ShowMenu => show_menu(hwnd),
+            Action::ShowSettings(point) => {
+                if State::with(|s| s.settings_login.is_some()).unwrap_or(false) {
+                    settings_window::finish_login(hwnd, true);
+                } else {
+                    settings_window::open(hwnd, point);
+                }
+            }
+            Action::ReturnToSettings => settings_window::finish_login(hwnd, true),
             Action::SignIn => submit_login(hwnd),
             Action::OpenUrl(url) => open_url_async(&url),
             Action::SetTopmost(on) => {
@@ -1392,6 +1410,20 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 };
                 save_window_state(hwnd);
                 invalidate(hwnd);
+            }
+            Action::SetFontFamily(name) => {
+                if !name.is_empty() && !theme::font_available(&name) {
+                    continue;
+                }
+                let detail = State::with(|s| {
+                    s.app.config.font_family = name;
+                    s.fonts = Fonts::load(s.scale, &s.app.config.font_family);
+                    s.app.save();
+                    s.detail.as_ref().map(|p| p.hwnd)
+                }).flatten();
+                settings_window::reload_fonts();
+                invalidate(hwnd);
+                if let Some(detail) = detail { invalidate(detail); }
             }
             Action::SetFontSize(size) => {
                 // Clamp here too, so a value that slipped past the menu (e.g. a
@@ -1493,14 +1525,15 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 apply_activation(hwnd, enabled);
                 State::with(|s| s.activatable = enabled);
             }
-            Action::OpenLogin(message, target) => {
-                State::with(|s| s.app.open_login(message, target));
-                sync_activation(&mut actions);
-                invalidate(hwnd);
-            }
             Action::RemoveAccount(id) => {
                 State::with(|s| {
                     s.app.config.remove_account(&id);
+                    s.app
+                        .config
+                        .hidden_channels
+                        .retain(|entry| entry.account_id != id);
+                    s.app.issues.retain(|issue| issue.id != id);
+                    s.app.open_accounts.retain(|account| account != &id);
                     s.app.accounts = s.app.config.accounts.clone();
                     let mut stored = s.app.stored.clone();
                     stored.forget_account(&id);
@@ -1519,7 +1552,7 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 sync_activation(&mut actions);
                 invalidate(hwnd);
             }
-            Action::ShowDetail(index) => open_detail(hwnd, index),
+            Action::ShowDetail(index, point) => open_detail(hwnd, index, point),
             Action::ToggleDetail => {
                 let popup = State::with(|s| {
                     let open = s.detail.as_mut()?;
@@ -1561,6 +1594,7 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
             }
         }
     }
+    settings_window::redraw();
 }
 
 fn invalidate(hwnd: HWND) {
@@ -1581,6 +1615,17 @@ fn save_window_state(hwnd: HWND) {
     // coordinate, not a length.
     let scale = window_scale(hwnd);
     State::with(|s| {
+        // Account editing temporarily expands a compact panel. Persist its
+        // original geometry rather than the form's working size.
+        if let Some(previous) = &s.settings_login {
+            let original = previous.geometry;
+            rc = RECT {
+                left: original.x,
+                top: original.y,
+                right: original.x + original.width,
+                bottom: original.y + original.height,
+            };
+        }
         s.app.config.logical_window = true;
         s.app.config.window = WindowState {
             x: rc.left,
@@ -1675,7 +1720,14 @@ fn paint(hwnd: HWND) {
 
 fn on_timer(hwnd: HWND, id: usize, actions: &mut Vec<Action>) {
     match id {
-        TIMER_POLL => pump_worker(actions),
+        TIMER_POLL => {
+            pump_worker(actions);
+            let done =
+                State::with(|s| s.settings_login.is_some() && !s.app.is_login()).unwrap_or(false);
+            if done {
+                settings_window::finish_login(hwnd, false);
+            }
+        }
         // Only the ages change between polls, and only while the list is shown.
         TIMER_CLOCK => {
             if State::with(|s| s.app.is_login()) == Some(false) {
@@ -1800,7 +1852,7 @@ fn apply_activation(hwnd: HWND, enabled: bool) {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
         }
     }
-    if enabled {
+    if enabled && !settings_window::is_visible() {
         unsafe {
             let _ = SetForegroundWindow(hwnd);
             let _ = SetFocus(Some(hwnd));
@@ -1872,6 +1924,13 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
     let y = ((lp.0 >> 16) & 0xFFFF) as i16 as f32;
     let m = metrics_for(hwnd);
 
+    if State::with(|s| !s.app.is_login()).unwrap_or(false)
+        && panel::settings_button(m).contains(x, y)
+    {
+        actions.push(Action::ShowSettings(popup::click_point(hwnd, lp)));
+        return;
+    }
+
     let mut redraw = false;
 
     // A GDI+ session to measure text with, so the caret can be placed at the
@@ -1886,6 +1945,7 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
             let action = s.app.login.as_ref().and_then(|f| login::hit(f, m, x, y));
             redraw = true;
             match action {
+                Some(LoginAction::Back) => actions.push(Action::ReturnToSettings),
                 Some(LoginAction::Submit) => actions.push(Action::SignIn),
                 Some(LoginAction::CycleMode) => {
                     if let Some(f) = s.app.login.as_mut() {
@@ -1994,7 +2054,7 @@ fn on_left_up(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
     .flatten();
 
     if let Some(index) = index {
-        actions.push(Action::ShowDetail(index));
+        actions.push(Action::ShowDetail(index, popup::click_point(hwnd, lp)));
     }
 }
 
@@ -2138,7 +2198,11 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
     });
 
     if quit {
-        actions.push(Action::Quit);
+        if State::with(|s| s.settings_login.is_some()).unwrap_or(false) {
+            actions.push(Action::ReturnToSettings);
+        } else {
+            actions.push(Action::Quit);
+        }
         return;
     }
     if submit {
@@ -2211,15 +2275,10 @@ fn submit_login(hwnd: HWND) {
                 let Some((id, name)) = upsert_form_account(s) else {
                     return;
                 };
-                let mode = s.app.config.credential_mode;
                 let mut stored = s.app.stored.clone();
-                if mode == CredentialMode::None {
-                    // The account still exists for this run; it just leaves
-                    // nothing behind for the next one.
-                    stored.forget_account(&id);
-                } else {
-                    stored.set_token(&id, &token);
-                }
+                // Keep live credentials in memory; Config::store alone decides
+                // what is allowed onto disk in “do not save” mode.
+                stored.set_token(&id, &token);
                 s.app.config.store(&stored);
                 s.app.stored = stored;
                 s.app.view = View::List;
@@ -2229,6 +2288,13 @@ fn submit_login(hwnd: HWND) {
             });
         }
     }
+    let done = State::with(|s| s.settings_login.is_some() && !s.app.is_login()).unwrap_or(false);
+    if done {
+        settings_window::finish_login(hwnd, false);
+    }
+    let mut actions = Vec::new();
+    sync_activation(&mut actions);
+    run_actions(hwnd, actions);
     invalidate(hwnd);
 }
 
@@ -2273,7 +2339,6 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
             s.app.config.always_on_top = on;
             if on {
                 s.app.config.always_on_bottom = false;
-                actions.push(Action::SetBottom(false));
             }
             actions.push(Action::SetTopmost(on));
         }
@@ -2299,57 +2364,7 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
             );
             actions.push(Action::OpenUrl(url));
         }
-        MENU_CLEAR_CREDS => actions.push(Action::ClearCredentials),
-        MENU_SIGNIN => {
-            // The form of the first account, or a new one when there is none.
-            let target = match s.app.accounts.first() {
-                Some(account) => LoginTarget::Account(account.id.clone()),
-                None => LoginTarget::Add,
-            };
-            actions.push(Action::OpenLogin(None, target));
-        }
-        MENU_ADD_ACCOUNT => actions.push(Action::OpenLogin(None, LoginTarget::Add)),
-        MENU_CHANNEL_CLEAR => {
-            s.app.config.hidden_channels.clear();
-            s.app.rebuild();
-            s.app.save();
-            s.app.status = Some(("已清除渠道过滤".into(), false));
-        }
-        _ if (MENU_ACCOUNT_BASE..MENU_ACCOUNT_BASE + MENU_RANGE_MAX).contains(&id) => {
-            // One entry per account, in menu order: sign it in again (or rename
-            // it) by opening its form.
-            if let Some(account) = s.app.accounts.get(id - MENU_ACCOUNT_BASE) {
-                let target = LoginTarget::Account(account.id.clone());
-                actions.push(Action::OpenLogin(None, target));
-            }
-        }
-        _ if (MENU_ACCOUNT_DELETE_BASE..MENU_ACCOUNT_DELETE_BASE + MENU_RANGE_MAX).contains(&id) => {
-            if let Some(account) = s.app.accounts.get(id - MENU_ACCOUNT_DELETE_BASE) {
-                actions.push(Action::RemoveAccount(account.id.clone()));
-            }
-        }
-        _ if (MENU_CHANNEL_BASE..MENU_CHANNEL_BASE + MENU_RANGE_MAX).contains(&id) => {
-            let filters = s.app.channel_filters();
-            if let Some(entry) = filters.get(id - MENU_CHANNEL_BASE) {
-                s.app
-                    .config
-                    .toggle_hidden_channel(&entry.account_id, &entry.channel);
-                let hidden = s
-                    .app
-                    .config
-                    .hides_channel(&entry.account_id, &entry.channel);
-                s.app.rebuild();
-                s.app.save();
-                s.app.status = Some((
-                    format!(
-                        "已{}渠道 {}",
-                        if hidden { "隐藏" } else { "显示" },
-                        entry.channel
-                    ),
-                    false,
-                ));
-            }
-        }
+        MENU_SETTINGS => actions.push(Action::ShowSettings(popup::cursor())),
         MENU_QUIT => actions.push(Action::Quit),
         MENU_ROWS_5 => actions.push(Action::ResizeToRows(5)),
         MENU_ROWS_10 => actions.push(Action::ResizeToRows(10)),
@@ -2391,6 +2406,8 @@ fn show_menu(hwnd: HWND) {
         let (pinned, bottom) =
             State::with(|s| (s.app.config.pin_position, s.app.config.always_on_bottom))
                 .unwrap_or((false, false));
+        add("设置…", MENU_SETTINGS, false, true);
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         // Row count submenu.
         let current_rows = State::with(|s| s.app.config.row_limit as usize).unwrap_or(12);
         if let Ok(rows_menu) = CreatePopupMenu() {
@@ -2459,151 +2476,9 @@ fn show_menu(hwnd: HWND) {
         add("打开请求页", MENU_OPEN, false, true);
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-
-        // Accounts: every saved login is polled and their requests merged, so
-        // this submenu is how one is added, edited (a fresh token) or dropped.
-        // A broken account is labelled with what is wrong with it.
-        let accounts: Vec<(String, String)> = State::with(|s| {
-            s.app
-                .accounts
-                .iter()
-                .map(|a| {
-                    let label = match s.app.account_state(&a.id) {
-                        Some(state) => format!("{} · {state}", a.name),
-                        None => a.name.clone(),
-                    };
-                    (a.id.clone(), label)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-        if let Ok(accounts_menu) = CreatePopupMenu() {
-            let mut sub_label = "账号".encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
-            for (index, (_, name)) in accounts.iter().enumerate() {
-                let mut wide = label(name);
-                let _ = AppendMenuW(
-                    accounts_menu,
-                    MF_STRING,
-                    MENU_ACCOUNT_BASE + index,
-                    PCWSTR(wide.as_mut_ptr()),
-                );
-            }
-            if !accounts.is_empty() {
-                let _ = AppendMenuW(accounts_menu, MF_SEPARATOR, 0, PCWSTR::null());
-            }
-            let mut add_label = "添加账号…"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect::<Vec<u16>>();
-            let _ = AppendMenuW(
-                accounts_menu,
-                MF_STRING,
-                MENU_ADD_ACCOUNT,
-                PCWSTR(add_label.as_mut_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING | MF_POPUP,
-                accounts_menu.0 as usize,
-                PCWSTR(sub_label.as_mut_ptr()),
-            );
-            let _ = sub_label;
-        }
-
-        // Channel filter: hide one account's channel so a request that account
-        // forwards to another login is not listed twice.
-        let filters = State::with(|s| {
-            let accounts: Vec<(String, String)> = s
-                .app
-                .accounts
-                .iter()
-                .map(|a| (a.id.clone(), a.name.clone()))
-                .collect();
-            s.app
-                .channel_filters()
-                .into_iter()
-                .map(|entry| {
-                    let name = accounts
-                        .iter()
-                        .find(|(id, _)| *id == entry.account_id)
-                        .map(|(_, name)| name.clone())
-                        .unwrap_or_else(|| entry.account_id.clone());
-                    let hidden = s.app.config.hides_channel(&entry.account_id, &entry.channel);
-                    (name, entry, hidden)
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-        if !filters.is_empty() {
-            if let Ok(channel_menu) = CreatePopupMenu() {
-                for (index, (name, entry, hidden)) in filters.iter().enumerate() {
-                    let mut wide = label(&format!("{name} · {}", entry.channel));
-                    let mut flags = MF_STRING;
-                    if *hidden {
-                        flags |= MF_CHECKED;
-                    }
-                    let _ = AppendMenuW(
-                        channel_menu,
-                        flags,
-                        MENU_CHANNEL_BASE + index,
-                        PCWSTR(wide.as_mut_ptr()),
-                    );
-                }
-                if filters.iter().any(|(_, _, hidden)| *hidden) {
-                    let _ = AppendMenuW(channel_menu, MF_SEPARATOR, 0, PCWSTR::null());
-                    let mut wide = label("清除渠道过滤");
-                    let _ = AppendMenuW(
-                        channel_menu,
-                        MF_STRING,
-                        MENU_CHANNEL_CLEAR,
-                        PCWSTR(wide.as_mut_ptr()),
-                    );
-                }
-                let mut sub_label = "渠道过滤"
-                    .encode_utf16()
-                    .chain(std::iter::once(0))
-                    .collect::<Vec<u16>>();
-                let _ = AppendMenuW(
-                    menu,
-                    MF_STRING | MF_POPUP,
-                    channel_menu.0 as usize,
-                    PCWSTR(sub_label.as_mut_ptr()),
-                );
-            }
-        }
-
-        // Only meaningful while the list is showing; on the form itself it
-        // would be a no-op that resets what the user has already typed.
-        let on_login = State::with(|s| s.app.is_login()).unwrap_or(false);
-        add("打开登录界面", MENU_SIGNIN, false, !on_login);
-
-        if !accounts.is_empty() {
-            if let Ok(delete_menu) = CreatePopupMenu() {
-                for (index, (_, name)) in accounts.iter().enumerate() {
-                    let mut wide = label(&format!("删除 {name}"));
-                    let _ = AppendMenuW(
-                        delete_menu,
-                        MF_STRING,
-                        MENU_ACCOUNT_DELETE_BASE + index,
-                        PCWSTR(wide.as_mut_ptr()),
-                    );
-                }
-                let mut sub_label = "删除账号"
-                    .encode_utf16()
-                    .chain(std::iter::once(0))
-                    .collect::<Vec<u16>>();
-                let _ = AppendMenuW(
-                    menu,
-                    MF_STRING | MF_POPUP,
-                    delete_menu.0 as usize,
-                    PCWSTR(sub_label.as_mut_ptr()),
-                );
-            }
-        }
-
-        add("清除保存的凭据", MENU_CLEAR_CREDS, false, true);
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add("固定窗口位置", MENU_PIN_POSITION, pinned, true);
+        let top = State::with(|s| s.app.config.always_on_top).unwrap_or(false);
+        add("置顶", MENU_TOPMOST, top, true);
         add("置底", MENU_BOTTOMMOST, bottom, true);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add("退出", MENU_QUIT, false, true);
@@ -2665,39 +2540,11 @@ fn detail_metrics(hwnd: HWND) -> detail::Popup {
     )
 }
 
-/// The popup's resting place: beside the panel when the work area has room on
-/// either side, otherwise against the work-area edge, over the panel.
-fn detail_geometry(panel: HWND, scale: f32, depth: detail::Depth) -> WindowState {
-    let work = work_area_for(panel);
-    let mut rc = RECT::default();
-    unsafe {
-        let _ = GetWindowRect(panel, &mut rc);
-    }
+/// Open at the clicked card, keeping the whole popup inside that monitor.
+fn detail_geometry(point: POINT, scale: f32, depth: detail::Depth) -> WindowState {
     let width = ui::layout::device_px(detail::POPUP_W as i32, scale);
     let height = ui::layout::device_px(detail::default_height(depth) as i32, scale);
-    let gap = (8.0 * scale).round() as i32;
-    let mut x = rc.left - gap - width;
-    if x < work.0 {
-        x = rc.right + gap;
-    }
-    if x + width > work.2 {
-        x = work.2 - width;
-    }
-    let mut y = rc.top;
-    if y + height > work.3 {
-        y = work.3 - height;
-    }
-    config::clamp_to_virtual_screen(
-        WindowState {
-            x,
-            y,
-            width,
-            height,
-        },
-        work,
-        scale,
-        false,
-    )
+    popup::at_point(point, width, height)
 }
 
 /// Give the popup the height its form is authored for, keeping its top-left
@@ -2783,7 +2630,7 @@ fn current_depth() -> detail::Depth {
 }
 
 /// Open — or refocus — the detail popup for a row of the list.
-fn open_detail(panel: HWND, index: usize) {
+fn open_detail(panel: HWND, index: usize, point: POINT) {
     enum Next {
         /// This request is already on screen; just raise the window.
         Focus(HWND),
@@ -2818,6 +2665,7 @@ fn open_detail(panel: HWND, index: usize) {
     };
     match next {
         Next::Focus(hwnd) => unsafe {
+            place_detail_at(hwnd, point);
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
         },
@@ -2826,7 +2674,7 @@ fn open_detail(panel: HWND, index: usize) {
                 Some(hwnd) => hwnd,
                 None => match create_detail_window(
                     panel,
-                    detail_geometry(panel, scale, current_depth()),
+                    detail_geometry(point, scale, current_depth()),
                 ) {
                     Some(hwnd) => hwnd,
                     None => return,
@@ -2854,6 +2702,9 @@ fn open_detail(panel: HWND, index: usize) {
                     id,
                 });
             });
+            if existing.is_some() {
+                place_detail_at(hwnd, point);
+            }
             unsafe {
                 let _ = ShowWindow(hwnd, SW_SHOW);
                 let _ = SetForegroundWindow(hwnd);
@@ -2861,6 +2712,16 @@ fn open_detail(panel: HWND, index: usize) {
             }
             invalidate(hwnd);
         }
+    }
+}
+
+fn place_detail_at(hwnd: HWND, point: POINT) {
+    let mut rc = RECT::default();
+    unsafe { let _ = GetWindowRect(hwnd, &mut rc); }
+    let placed = popup::at_point(point, rc.right - rc.left, rc.bottom - rc.top);
+    unsafe {
+        let _ = SetWindowPos(hwnd, None, placed.x, placed.y, placed.width, placed.height,
+            SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
@@ -2882,6 +2743,13 @@ unsafe extern "system" fn detail_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     let mut actions: Vec<Action> = Vec::new();
 
     match msg {
+        WM_ACTIVATE => {
+            if wp.0 as u32 & 0xFFFF == WA_INACTIVE {
+                popup::dismiss_later(hwnd);
+            }
+            return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
+        }
+        popup::WM_DISMISS => popup::dismiss_if_inactive(hwnd),
         WM_PAINT => paint_detail(hwnd),
         WM_ERASEBKGND => {}
         WM_NCHITTEST => {

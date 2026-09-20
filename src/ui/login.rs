@@ -34,6 +34,8 @@ pub enum Method {
 
 #[derive(Clone)]
 pub struct LoginForm {
+    /// Account management returns to the settings window instead of exiting.
+    pub return_to_settings: bool,
     /// Label the account is saved under. Required: the menu lists accounts by
     /// name, so an unnamed one would be an unlabelled entry.
     pub account_name: String,
@@ -92,6 +94,7 @@ impl LoginForm {
         // path — `Method::Password`, the email/password fields and everything
         // that submits them — is kept, just not reachable from here.
         LoginForm {
+            return_to_settings: false,
             account_name: String::new(),
             editing: None,
             endpoint: endpoint.to_string(),
@@ -508,7 +511,7 @@ pub fn layout(form: &LoginForm, m: Metrics) -> LoginLayout {
     let inner_w = card_w - 36.0 * s;
 
     let has_credentials = form.method == Method::Password;
-    let field_count = if has_credentials { 3.0 } else { 2.0 };
+    let field_count = if has_credentials { 4.0 } else { 3.0 };
     let card_h = (HEAD_H + TAIL_H) * s + field_count * (label_h + field_h + field_gap);
 
     let card_y = ((m.height - card_h) / 2.0).max(16.0 * s);
@@ -847,6 +850,13 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
         theme::ALIGN_NEAR,
     );
 
+    if form.return_to_settings {
+        let r = back_button(form, m);
+        p.dual_text(
+            &fonts.small, "返回设置", r.x, r.y, r.w, r.h, theme::MAUVE, theme::ALIGN_FAR,
+        );
+    }
+
     // The method tabs are gone: the password method is hidden, so there is
     // nothing to choose. `Method` and everything behind it is still in place
     // should the choice ever come back.
@@ -944,6 +954,9 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
 
 /// Map a click to a form control.
 pub fn hit(form: &LoginForm, m: Metrics, x: f32, y: f32) -> Option<Action> {
+    if form.return_to_settings && back_button(form, m).contains(x, y) {
+        return Some(Action::Back);
+    }
     let l = layout(form, m);
     if l.button.contains(x, y) {
         return Some(Action::Submit);
@@ -965,6 +978,16 @@ pub fn hit(form: &LoginForm, m: Metrics, x: f32, y: f32) -> Option<Action> {
     None
 }
 
+fn back_button(form: &LoginForm, m: Metrics) -> Rect {
+    let card = layout(form, m).card;
+    Rect {
+        x: card.x + card.w - 104.0 * m.scale,
+        y: card.y + 10.0 * m.scale,
+        w: 86.0 * m.scale,
+        h: 30.0 * m.scale,
+    }
+}
+
 /// Which field a displayed row corresponds to. The token method shows one row
 /// more than the password method, which has the two credential rows instead.
 fn field_for(method: Method, index: usize) -> Field {
@@ -979,6 +1002,7 @@ fn field_for(method: Method, index: usize) -> Field {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
+    Back,
     Submit,
     CycleMode,
     /// Choosing a method is no longer possible from the form — the tabs are

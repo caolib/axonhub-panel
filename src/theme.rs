@@ -114,6 +114,7 @@ pub struct Fonts {
 /// First family in `names` that the system can resolve, or null if none can.
 fn pick(names: &[&str]) -> *mut GpFontFamily {
     for name in names {
+        if name.trim().is_empty() { continue; }
         let f = family(name);
         if !f.is_null() {
             return f;
@@ -139,26 +140,46 @@ fn make_font(fam: *mut GpFontFamily, size: f32, bold: bool) -> *mut GpFont {
     if fam.is_null() {
         return std::ptr::null_mut();
     }
-    let mut font: *mut GpFont = std::ptr::null_mut();
     unsafe {
-        GdipCreateFont(fam, size, if bold { 1 } else { 0 }, UNIT_PIXEL, &mut font);
+        // Some installed families only supply an italic or bold face.
+        for style in if bold { [1, 3, 0, 2] } else { [0, 2, 1, 3] } {
+            let mut font: *mut GpFont = std::ptr::null_mut();
+            if GdipCreateFont(fam, size, style, UNIT_PIXEL, &mut font).0 == 0 {
+                return font;
+            }
+        }
     }
-    font
+    std::ptr::null_mut()
+}
+
+pub fn font_available(name: &str) -> bool {
+    let family = family(name);
+    if family.is_null() { return false; }
+    let font = make_font(family, 12.5, false);
+    let available = !font.is_null();
+    unsafe {
+        if available { GdipDeleteFont(font); }
+        GdipDeleteFontFamily(family);
+    }
+    available
 }
 
 impl Fonts {
-    pub fn load(scale: f32) -> Self {
-        // Single font family for both Latin and CJK — JetBrainsLxgwNerdMono
-        // covers both with 2:1 metrics, so run splitting uses the same metrics
-        // everywhere.
-        let family = pick(&[
+    pub fn load(scale: f32, preferred: &str) -> Self {
+        let defaults = [
             "JetBrainsLxgwNerdMono",
             "Maple Mono NF CN",
             "Microsoft YaHei UI",
             "Segoe UI",
-        ]);
-        let latin_family = family;
-        let cjk_family = family;
+        ];
+        let selected = if preferred.is_empty() { std::ptr::null_mut() } else { family(preferred) };
+        let latin_family = if selected.is_null() { pick(&defaults) } else { selected };
+        let cjk_family = if selected.is_null() || crate::font_catalog::supports_chinese(preferred) {
+            latin_family
+        } else {
+            // A Latin-only face should not make Chinese labels unreadable.
+            pick(&defaults)
+        };
 
         let s = |v: f32| v * scale;
         let dual = |size: f32, bold: bool| DualFont {
@@ -187,10 +208,11 @@ impl Drop for Fonts {
                     }
                 }
             }
-            for fam in [self.latin_family, self.cjk_family] {
-                if !fam.is_null() {
-                    GdipDeleteFontFamily(fam);
-                }
+            if !self.latin_family.is_null() {
+                GdipDeleteFontFamily(self.latin_family);
+            }
+            if !self.cjk_family.is_null() && self.cjk_family != self.latin_family {
+                GdipDeleteFontFamily(self.cjk_family);
             }
         }
     }
@@ -328,6 +350,12 @@ impl Painter {
             Width: w,
             Height: h,
         };
+        // Text owns only its cell clip. Preserve the caller's scrolling/input
+        // viewport instead of resetting it when a mixed CJK/Latin run ends.
+        let mut state = 0;
+        unsafe {
+            GdipSaveGraphics(self.g, &mut state);
+        }
         self.clip(clip);
         for (text, cjk) in runs {
             let face = if cjk { font.cjk } else { font.latin };
@@ -342,7 +370,9 @@ impl Painter {
             self.text(face, text, cursor, y, avail, h, color, ALIGN_NEAR);
             cursor += run_w;
         }
-        self.reset_clip();
+        unsafe {
+            GdipRestoreGraphics(self.g, state);
+        }
     }
 
     /// Width of `s` when drawn with `font`, mixing faces per run.

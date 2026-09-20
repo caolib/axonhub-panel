@@ -187,6 +187,15 @@ fn draw_edge(p: &Painter, m: Metrics) {
     p.fill_rect(m.width - t, 0.0, t, m.height, c);
 }
 
+pub fn settings_button(m: Metrics) -> Rect {
+    Rect {
+        x: m.width - m.pad() - 40.0 * m.scale,
+        y: (m.header_h - 20.0 * m.scale) / 2.0,
+        w: 40.0 * m.scale,
+        h: 20.0 * m.scale,
+    }
+}
+
 fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     let s = m.scale;
     let y = 6.0 * s;
@@ -199,7 +208,16 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     } else {
         v.rows.len()
     };
-    let right = m.width - m.pad() - 2.0;
+    let settings = settings_button(m);
+    p.round_rect(
+        settings.x, settings.y, settings.w, settings.h,
+        3.0 * s, theme::CARD_HOVER, true,
+    );
+    p.dual_text(
+        &fonts.small, "设置", settings.x, settings.y, settings.w, settings.h,
+        theme::TEXT_DIM, theme::ALIGN_CENTER,
+    );
+    let right = settings.x - 8.0 * s;
 
     let blue_str = blue_num.to_string();
     let gray_text = if blue_num > 0 {
