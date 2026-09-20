@@ -1,7 +1,7 @@
 //! Settings content and geometry, shared by painting, pointer and keyboard input.
 
 use crate::app::App;
-use crate::config::{CredentialMode, HiddenChannel};
+use crate::config::{CredentialMode, DisplayField, HiddenChannel};
 use crate::font_catalog::InstalledFont;
 use crate::theme::{self, Fonts, Painter};
 use crate::ui::layout::Rect;
@@ -17,6 +17,7 @@ const FOOTER: f32 = 70.0;
 pub enum Tab {
     #[default]
     Display,
+    Fields,
     Fonts,
     Accounts,
     Channels,
@@ -26,6 +27,8 @@ pub enum Tab {
 pub enum Action {
     Tab(Tab),
     Rows(usize),
+    Field(DisplayField),
+    ShowAllFields,
     Font(f32),
     FontFamily(String),
     FontSearch,
@@ -86,6 +89,8 @@ pub struct Control {
     pub danger: bool,
     /// Content controls scroll; header and footer controls stay in place.
     pub body: bool,
+    /// A checkbox row: label left-aligned, state carried by the ☑/☐ prefix.
+    pub check: bool,
 }
 
 struct Label {
@@ -119,9 +124,10 @@ impl Layout {
             },
             font_header: None,
         };
-        let tab_w = (width - 52.0) / 4.0;
+        let tab_w = (width - 56.0) / 5.0;
         for (i, (tab, label)) in [
             (Tab::Display, "显示与窗口".to_string()),
+            (Tab::Fields, "属性显示".to_string()),
             (Tab::Fonts, "字体".to_string()),
             (
                 Tab::Accounts,
@@ -148,6 +154,7 @@ impl Layout {
         }
         match state.tab {
             Tab::Display => l.display(app),
+            Tab::Fields => l.fields(app),
             Tab::Fonts => l.fonts(app, state),
             Tab::Accounts => l.accounts(app),
             Tab::Channels => l.channels(app),
@@ -227,7 +234,39 @@ impl Layout {
             selected,
             danger,
             body,
+            check: false,
         });
+    }
+
+    /// A two-column checkbox row: `checked` means the cell is shown on cards.
+    fn checkbox(&mut self, rect: Rect, label: impl Into<String>, action: Action, checked: bool) {
+        self.controls.push(Control {
+            rect,
+            label: format!("{}  {}", if checked { "☑" } else { "☐" }, label.into()),
+            action,
+            selected: checked,
+            danger: false,
+            body: true,
+            check: true,
+        });
+    }
+
+    /// Lay checkbox rows out in `columns` columns.
+    fn check_grid(&mut self, y: f32, rows: Vec<(String, Action, bool)>, columns: usize) {
+        let w = (self.width - 48.0 - (columns - 1) as f32 * 6.0) / columns as f32;
+        for (i, (label, action, checked)) in rows.into_iter().enumerate() {
+            self.checkbox(
+                Rect {
+                    x: 24.0 + (i % columns) as f32 * (w + 6.0),
+                    y: y + (i / columns) as f32 * 36.0,
+                    w,
+                    h: 30.0,
+                },
+                label,
+                action,
+                checked,
+            );
+        }
     }
 
     fn label(&mut self, y: f32, text: impl Into<String>, heading: bool) {
@@ -347,6 +386,38 @@ impl Layout {
             2,
         );
         self.content_height = 536.0;
+    }
+
+    fn fields(&mut self, app: &App) {
+        let hidden = app.config.hidden_fields.len();
+        self.label(0.0, format!("属性显示 · 已隐藏 {hidden} 项"), true);
+        self.label(26.0, "取消勾选可在卡片上隐藏对应信息，默认全部显示", false);
+        self.button(
+            Rect {
+                x: 24.0,
+                y: 62.0,
+                w: 144.0,
+                h: 30.0,
+            },
+            "全部显示",
+            Action::ShowAllFields,
+            false,
+            false,
+            true,
+        );
+        let rows = DisplayField::ALL
+            .into_iter()
+            .map(|field| {
+                (
+                    field.label().to_string(),
+                    Action::Field(field),
+                    app.config.shows(field),
+                )
+            })
+            .collect();
+        self.check_grid(108.0, rows, 2);
+        // Seven rows of checkboxes: the button above plus 7*36 of grid.
+        self.content_height = 108.0 + 7.0 * 36.0 + 12.0;
     }
 
     fn accounts(&mut self, app: &App) {
@@ -780,7 +851,10 @@ impl Layout {
                 let enabled = self.available(state, c);
                 let hover = enabled && state.hover.as_ref() == Some(&c.action);
                 let focused = enabled && state.focus.as_ref() == Some(&c.action);
-                let fill = if c.selected {
+                // A checkbox row keeps the card surface: its state is already
+                // legible from the ☑/☐ prefix, so a selected fill would only
+                // add noise to a list of thirteen.
+                let fill = if !c.check && c.selected {
                     theme::TAB_ON
                 } else if hover {
                     theme::CARD_HOVER
@@ -804,7 +878,7 @@ impl Layout {
                     5.0 * scale,
                     if focused {
                         theme::MAUVE
-                    } else if c.selected {
+                    } else if c.selected && !c.check {
                         theme::INPUT_BORDER
                     } else {
                         theme::BORDER
@@ -815,21 +889,32 @@ impl Layout {
                     theme::TEXT_FAINT
                 } else if c.danger {
                     theme::RED
+                } else if c.check {
+                    if c.selected {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_FAINT
+                    }
                 } else if c.selected {
                     theme::MAUVE
                 } else {
                     theme::TEXT
                 };
+                let (label_x, align) = if c.check {
+                    (r.x + 10.0, theme::ALIGN_NEAR)
+                } else {
+                    (r.x + 5.0, theme::ALIGN_CENTER)
+                };
                 text(
                     Rect {
-                        x: r.x + 5.0,
-                        w: r.w - 10.0,
+                        x: label_x,
+                        w: r.w - 15.0,
                         ..r
                     },
                     &c.label,
                     false,
                     color,
-                    theme::ALIGN_CENTER,
+                    align,
                 );
             }
         }
@@ -926,5 +1011,54 @@ mod tests {
         assert_eq!(state.focus, Some(Action::Cancel));
         layout.focus_next(&mut state, false);
         assert_eq!(state.focus, Some(Action::Confirm));
+    }
+
+    #[test]
+    fn every_card_cell_has_a_checkbox_that_hits_its_own_cell() {
+        let app = App::new(Config::default());
+        let state = State {
+            tab: Tab::Fields,
+            ..Default::default()
+        };
+        let layout = Layout::new(&app, &state, WIDTH, HEIGHT);
+        for field in DisplayField::ALL {
+            let control = layout
+                .controls
+                .iter()
+                .find(|c| c.action == Action::Field(field))
+                .unwrap_or_else(|| panic!("{field:?} should have a checkbox"));
+            assert!(control.check, "{field:?} should be a checkbox row");
+            assert!(control.selected, "{field:?} should start checked");
+            let rect = layout.screen_rect(control, state.scroll);
+            assert_eq!(
+                layout.hit(&state, rect.x + 2.0, rect.y + 2.0),
+                Some(Action::Field(field)),
+            );
+        }
+        assert_eq!(DisplayField::ALL.len(), 13);
+    }
+
+    #[test]
+    fn hidden_cells_show_unchecked_and_there_is_a_reset() {
+        let mut app = App::new(Config::default());
+        app.config.toggle_field(DisplayField::Retry);
+        let state = State {
+            tab: Tab::Fields,
+            ..Default::default()
+        };
+        let layout = Layout::new(&app, &state, WIDTH, HEIGHT);
+        let retry = layout
+            .controls
+            .iter()
+            .find(|c| c.action == Action::Field(DisplayField::Retry))
+            .unwrap();
+        assert!(!retry.selected);
+        assert!(
+            layout
+                .controls
+                .iter()
+                .any(|c| c.action == Action::ShowAllFields),
+            "the tab offers a reset"
+        );
     }
 }

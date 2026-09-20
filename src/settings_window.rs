@@ -626,6 +626,18 @@ fn dispatch(hwnd: HWND, action: Action) {
             focus_control(hwnd, false);
         }
         Action::Rows(rows) => actions.push(PanelAction::ResizeToRows(rows)),
+        Action::Field(field) => {
+            PanelState::with(|s| {
+                s.app.config.toggle_field(field);
+                s.app.save();
+            });
+        }
+        Action::ShowAllFields => {
+            PanelState::with(|s| {
+                s.app.config.show_all_fields();
+                s.app.save();
+            });
+        }
         Action::Font(size) => actions.push(PanelAction::SetFontSize(size)),
         Action::FontFamily(name) => actions.push(PanelAction::SetFontFamily(name)),
         Action::FontSearch => focus_control(hwnd, false),

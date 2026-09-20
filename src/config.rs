@@ -80,6 +80,9 @@ pub struct Config {
     pub accounts: Vec<Account>,
     /// (account, channel) pairs whose requests are hidden from the merged list.
     pub hidden_channels: Vec<HiddenChannel>,
+    /// Card cells the user switched off in the settings window. Empty means
+    /// everything is shown, so a cell added in a later version starts visible.
+    pub hidden_fields: Vec<DisplayField>,
     pub window: WindowState,
 }
 
@@ -128,6 +131,7 @@ impl Default for Config {
             logical_window: true,
             accounts: Vec::new(),
             hidden_channels: Vec::new(),
+            hidden_fields: Vec::new(),
             window: WindowState::default(),
         }
     }
@@ -190,6 +194,75 @@ pub struct Account {
 pub struct HiddenChannel {
     pub account_id: String,
     pub channel: String,
+}
+
+/// One informational cell a request card can show. Listed in the order the
+/// settings window offers them: the status marks first, then the request's
+/// identity and routing, and finally the timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DisplayField {
+    /// 流: whether the client asked for a streamed answer.
+    Stream,
+    /// 转: whether the protocol was converted on the way out.
+    Conversion,
+    /// 透: whether pass-through was applied.
+    PassThrough,
+    Model,
+    /// 协议: the interface type the caller spoke.
+    Protocol,
+    Caller,
+    Channel,
+    Tokens,
+    /// 缓存: prompt cache hit rate.
+    Cache,
+    /// 速度: tokens per second.
+    Speed,
+    /// 重试: attempts beyond the first.
+    Retry,
+    /// 账号: which saved login the request came from.
+    Account,
+    /// 创建时间: relative timestamp.
+    CreatedAt,
+}
+
+impl DisplayField {
+    /// Every cell, in settings order.
+    pub const ALL: [DisplayField; 13] = [
+        DisplayField::Stream,
+        DisplayField::Conversion,
+        DisplayField::PassThrough,
+        DisplayField::Model,
+        DisplayField::Protocol,
+        DisplayField::Caller,
+        DisplayField::Channel,
+        DisplayField::Tokens,
+        DisplayField::Cache,
+        DisplayField::Speed,
+        DisplayField::Retry,
+        DisplayField::Account,
+        DisplayField::CreatedAt,
+    ];
+
+    /// Name shown on the settings checkbox: the card's mark, followed by what
+    /// the cell actually holds.
+    pub fn label(self) -> &'static str {
+        match self {
+            DisplayField::Stream => "流 · 流式传输",
+            DisplayField::Conversion => "转 · 协议转换",
+            DisplayField::PassThrough => "透 · 透传",
+            DisplayField::Model => "模型",
+            DisplayField::Protocol => "协议 · 接口类型",
+            DisplayField::Caller => "调用方 · API Key",
+            DisplayField::Channel => "渠道",
+            DisplayField::Tokens => "词元 · Token 数",
+            DisplayField::Cache => "缓存 · 命中率",
+            DisplayField::Speed => "速度 · tok/s",
+            DisplayField::Retry => "重试次数",
+            DisplayField::Account => "账号标签",
+            DisplayField::CreatedAt => "创建时间",
+        }
+    }
 }
 
 impl Stored {
@@ -307,9 +380,7 @@ impl Config {
                     // outside the 10–24 range the menu offers; fall back to the
                     // authored 12.5 so a bad number can never shrink the panel
                     // to nothing or blow it up. Kept exactly as before.
-                    if !config.font_size.is_finite()
-                        || !(10.0..=24.0).contains(&config.font_size)
-                    {
+                    if !config.font_size.is_finite() || !(10.0..=24.0).contains(&config.font_size) {
                         config.font_size = 12.5;
                     }
                     (config, ConfigLoadStatus::Ok)
@@ -413,6 +484,27 @@ impl Config {
             None => self.hidden_channels.push(entry),
         }
     }
+
+    /// Whether a card shows this cell. Everything starts visible, so only the
+    /// hidden list is stored.
+    pub fn shows(&self, field: DisplayField) -> bool {
+        !self.hidden_fields.contains(&field)
+    }
+
+    /// Switch a card cell off, or back on.
+    pub fn toggle_field(&mut self, field: DisplayField) {
+        match self.hidden_fields.iter().position(|f| *f == field) {
+            Some(index) => {
+                self.hidden_fields.remove(index);
+            }
+            None => self.hidden_fields.push(field),
+        }
+    }
+
+    /// Show every card cell again.
+    pub fn show_all_fields(&mut self) {
+        self.hidden_fields.clear();
+    }
 }
 
 /// Fold the single-account credentials of an older install into the account
@@ -495,10 +587,7 @@ fn preserve_corrupt(path: &Path, raw: &str) {
     }
     // Both attempts failed: the bad bytes are unrecoverable. Log so the loss is
     // at least visible in the audit trail.
-    warn!(
-        "无法备份损坏的配置文件(字节已丢失): {}",
-        path.display()
-    );
+    warn!("无法备份损坏的配置文件(字节已丢失): {}", path.display());
 }
 
 /// Seconds since the Unix epoch, used to disambiguate successive corrupt
@@ -839,6 +928,46 @@ mod tests {
         // panel to the compact layout.
         let back: Config = serde_json::from_str("{}").unwrap();
         assert!(!back.single_line);
+    }
+
+    #[test]
+    fn every_card_cell_starts_visible_and_can_be_switched_off() {
+        let mut config = Config::default();
+        for field in DisplayField::ALL {
+            assert!(config.shows(field), "{field:?} should start visible");
+        }
+        config.toggle_field(DisplayField::Tokens);
+        assert!(!config.shows(DisplayField::Tokens));
+        assert!(
+            config.shows(DisplayField::Model),
+            "hiding one keeps the rest"
+        );
+        assert_eq!(config.hidden_fields, vec![DisplayField::Tokens]);
+
+        // Toggling again shows it, and the reset clears every choice.
+        config.toggle_field(DisplayField::Tokens);
+        assert!(config.shows(DisplayField::Tokens));
+        config.toggle_field(DisplayField::Speed);
+        config.show_all_fields();
+        assert!(config.hidden_fields.is_empty());
+    }
+
+    #[test]
+    fn hidden_fields_round_trip_as_camel_case_names() {
+        let config = Config {
+            hidden_fields: vec![DisplayField::PassThrough, DisplayField::CreatedAt],
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"passThrough\""), "{json}");
+        assert!(json.contains("\"createdAt\""), "{json}");
+
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.hidden_fields, config.hidden_fields);
+        assert!(!back.shows(DisplayField::PassThrough));
+        // A file written before the setting existed shows everything.
+        let older: Config = serde_json::from_str("{}").unwrap();
+        assert!(older.hidden_fields.is_empty());
     }
 
     #[test]

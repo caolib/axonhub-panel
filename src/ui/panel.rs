@@ -8,7 +8,7 @@
 
 use windows::Win32::Graphics::GdiPlus::RectF;
 
-use crate::config::Account;
+use crate::config::{Account, DisplayField};
 use crate::format as fmt;
 use crate::model::{self, Filter, FilterMask, Row};
 use crate::theme::{self, Painter};
@@ -168,6 +168,15 @@ pub struct ListView<'a> {
     pub pinned: bool,
     /// Selected status-filter bits; the header chips highlight against this.
     pub filter: FilterMask,
+    /// Card cells the user switched off; everything else is drawn.
+    pub hidden_fields: &'a [DisplayField],
+}
+
+impl ListView<'_> {
+    /// Whether one card cell should be drawn.
+    pub fn shows(&self, field: DisplayField) -> bool {
+        !self.hidden_fields.contains(&field)
+    }
 }
 
 pub fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
@@ -210,12 +219,23 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     };
     let settings = settings_button(m);
     p.round_rect(
-        settings.x, settings.y, settings.w, settings.h,
-        3.0 * s, theme::CARD_HOVER, true,
+        settings.x,
+        settings.y,
+        settings.w,
+        settings.h,
+        3.0 * s,
+        theme::CARD_HOVER,
+        true,
     );
     p.dual_text(
-        &fonts.small, "设置", settings.x, settings.y, settings.w, settings.h,
-        theme::TEXT_DIM, theme::ALIGN_CENTER,
+        &fonts.small,
+        "设置",
+        settings.x,
+        settings.y,
+        settings.w,
+        settings.h,
+        theme::TEXT_DIM,
+        theme::ALIGN_CENTER,
     );
     let right = settings.x - 8.0 * s;
 
@@ -454,7 +474,7 @@ fn draw_card(
     let mark_gap = 2.0 * m.scale;
 
     // 流 (streaming): bright when the client streamed, faint when it did not.
-    {
+    if v.shows(DisplayField::Stream) {
         let w = p.dual_measure(&fonts.body, "流");
         p.dual_text(
             &fonts.body,
@@ -474,7 +494,7 @@ fn draw_card(
     }
 
     // Protocol conversion mark: 转 yellow when conversion happened, green otherwise.
-    {
+    if v.shows(DisplayField::Conversion) {
         let w = p.dual_measure(&fonts.body, "转");
         p.dual_text(
             &fonts.body,
@@ -494,7 +514,7 @@ fn draw_card(
     }
 
     // Pass-through mark: 透 green when applied, gray otherwise.
-    {
+    if v.shows(DisplayField::PassThrough) {
         let w = p.dual_measure(&fonts.body, "透");
         p.dual_text(
             &fonts.body,
@@ -513,27 +533,30 @@ fn draw_card(
         x += w + line1_gap;
     }
 
-    // Time: right-aligned on line 1.
-    let time_text = fmt::relative_time(row.created_at.as_deref(), v.now);
-    let time_w = p.dual_measure(&fonts.body, &time_text) + 4.0;
-    let time_x = rect.x + rect.w - c.inner_pad - time_w;
+    // Right-aligned cells are placed first so the left cluster knows what room
+    // is left: the time, then the account tag.
+    let mut cells_limit = rect.x + rect.w - c.inner_pad;
 
-    p.dual_text(
-        &fonts.body,
-        &time_text,
-        time_x,
-        line1_y,
-        time_w,
-        c.line1,
-        theme::TEXT_FAINT,
-        theme::ALIGN_FAR,
-    );
+    if v.shows(DisplayField::CreatedAt) {
+        let time_text = fmt::relative_time(row.created_at.as_deref(), v.now);
+        let time_w = p.dual_measure(&fonts.body, &time_text) + 4.0;
+        p.dual_text(
+            &fonts.body,
+            &time_text,
+            cells_limit - time_w,
+            line1_y,
+            time_w,
+            c.line1,
+            theme::TEXT_FAINT,
+            theme::ALIGN_FAR,
+        );
+        cells_limit -= time_w + 4.0 * m.scale;
+    }
 
     // Account tag, immediately left of the time. Only when there is more than
     // one account whose requests are merged here — with a single account it
     // would say nothing.
-    let mut cells_limit = time_x - 4.0 * m.scale;
-    if v.accounts.len() > 1 && !row.account_name.is_empty() {
+    if v.shows(DisplayField::Account) && v.accounts.len() > 1 && !row.account_name.is_empty() {
         let color = account_color(v.accounts, &row.account_id);
         let w = p.dual_measure(&fonts.small, &row.account_name);
         let tag_x = cells_limit - w - 6.0 * m.scale;
@@ -554,7 +577,9 @@ fn draw_card(
 
     // Protocol name (chat/responses/messages): the interface type the client
     // spoke, placed right after the marks so it sits beside its indicators.
-    if let Some(name) = &row.format {
+    if v.shows(DisplayField::Protocol)
+        && let Some(name) = &row.format
+    {
         let w = p.dual_measure(&fonts.small, name);
         if x + w < cells_limit {
             p.dual_text(
@@ -572,7 +597,9 @@ fn draw_card(
     }
 
     // Caller (API key name).
-    if let Some(caller) = &row.caller {
+    if v.shows(DisplayField::Caller)
+        && let Some(caller) = &row.caller
+    {
         let w = p.dual_measure(&fonts.small, caller);
         if x + w < cells_limit {
             p.dual_text(
@@ -590,7 +617,9 @@ fn draw_card(
     }
 
     // Channel.
-    if let Some(channel) = &row.channel {
+    if v.shows(DisplayField::Channel)
+        && let Some(channel) = &row.channel
+    {
         let color = ch_palette
             .iter()
             .find(|(n, _)| *n == channel.as_str())
@@ -613,7 +642,7 @@ fn draw_card(
     }
 
     // Tokens.
-    if row.total_tokens > 0 {
+    if v.shows(DisplayField::Tokens) && row.total_tokens > 0 {
         let tokens = fmt::tokens_compact(row.total_tokens);
         let w = p.dual_measure(&fonts.small, &tokens);
         if x + w < cells_limit {
@@ -638,7 +667,9 @@ fn draw_card(
     let mut right_edge = rect.x + rect.w - c.inner_pad;
 
     // TPS (tokens per second).
-    if let Some(tps) = row.tps() {
+    if v.shows(DisplayField::Speed)
+        && let Some(tps) = row.tps()
+    {
         let label = format!("{tps:.0} tok/s");
         let w = p.dual_measure(&fonts.small, &label);
         p.dual_text(
@@ -655,7 +686,7 @@ fn draw_card(
     }
 
     // Retry badge.
-    if row.attempt_count > 1 {
+    if v.shows(DisplayField::Retry) && row.attempt_count > 1 {
         let label = format!("{}×", row.attempt_count - 1);
         let w = p.dual_measure(&fonts.small, &label) + 6.0;
         p.dual_text(
@@ -677,38 +708,42 @@ fn draw_card(
 
     // Model name with reasoning effort, e.g. "glm-5.2(max)". Drawn on a soft
     // chip so the served model stands apart from the surrounding metrics.
-    let display = row.display_model();
-    let model_color = mdl_palette
-        .iter()
-        .find(|(n, _)| *n == row.served_model())
-        .map(|(_, c)| *c)
-        .unwrap_or(theme::TEXT);
-    let chip_w =
-        (p.dual_measure(&fonts.small, &display) + c.chip_hpad * 2.0).min((right_edge - x).max(0.0));
-    let text_w = (chip_w - c.chip_hpad * 2.0).max(0.0);
-    p.round_rect(
-        x,
-        y - c.chip_vpad,
-        chip_w,
-        c.chip_h(),
-        3.0 * m.scale,
-        theme::BORDER,
-        true,
-    );
-    p.dual_text(
-        &fonts.small,
-        &display,
-        x + c.chip_hpad,
-        y,
-        text_w,
-        c.line2,
-        model_color,
-        theme::ALIGN_NEAR,
-    );
-    x += chip_w + line2_gap;
+    if v.shows(DisplayField::Model) {
+        let display = row.display_model();
+        let model_color = mdl_palette
+            .iter()
+            .find(|(n, _)| *n == row.served_model())
+            .map(|(_, c)| *c)
+            .unwrap_or(theme::TEXT);
+        let chip_w = (p.dual_measure(&fonts.small, &display) + c.chip_hpad * 2.0)
+            .min((right_edge - x).max(0.0));
+        let text_w = (chip_w - c.chip_hpad * 2.0).max(0.0);
+        p.round_rect(
+            x,
+            y - c.chip_vpad,
+            chip_w,
+            c.chip_h(),
+            3.0 * m.scale,
+            theme::BORDER,
+            true,
+        );
+        p.dual_text(
+            &fonts.small,
+            &display,
+            x + c.chip_hpad,
+            y,
+            text_w,
+            c.line2,
+            model_color,
+            theme::ALIGN_NEAR,
+        );
+        x += chip_w + line2_gap;
+    }
 
     // Cache hit rate.
-    if let Some(rate) = row.cache_hit_rate() {
+    if v.shows(DisplayField::Cache)
+        && let Some(rate) = row.cache_hit_rate()
+    {
         let label = format!("{rate:.2}%");
         let w = p.dual_measure(&fonts.small, &label);
         if x + w < right_edge {
@@ -762,24 +797,26 @@ fn draw_card_single(
     // knows exactly how much room it has.
     let mut right = rect.x + rect.w - c.inner_pad;
 
-    let time_text = fmt::relative_time(row.created_at.as_deref(), v.now);
-    let time_w = p.dual_measure(&fonts.body, &time_text) + 4.0;
-    let time_x = right - time_w;
-    p.dual_text(
-        &fonts.body,
-        &time_text,
-        time_x,
-        body_y,
-        time_w,
-        c.line1,
-        theme::TEXT_FAINT,
-        theme::ALIGN_FAR,
-    );
-    right = time_x - 8.0 * s;
+    if v.shows(DisplayField::CreatedAt) {
+        let time_text = fmt::relative_time(row.created_at.as_deref(), v.now);
+        let time_w = p.dual_measure(&fonts.body, &time_text) + 4.0;
+        let time_x = right - time_w;
+        p.dual_text(
+            &fonts.body,
+            &time_text,
+            time_x,
+            body_y,
+            time_w,
+            c.line1,
+            theme::TEXT_FAINT,
+            theme::ALIGN_FAR,
+        );
+        right = time_x - 8.0 * s;
+    }
 
     // Account tag, immediately left of the time; only when more than one
     // account is merged into this list.
-    if v.accounts.len() > 1 && !row.account_name.is_empty() {
+    if v.shows(DisplayField::Account) && v.accounts.len() > 1 && !row.account_name.is_empty() {
         let color = account_color(v.accounts, &row.account_id);
         let w = p.dual_measure(&fonts.small, &row.account_name);
         p.dual_text(
@@ -795,7 +832,9 @@ fn draw_card_single(
         right -= w + 10.0 * s;
     }
 
-    if let Some(tps) = row.tps() {
+    if v.shows(DisplayField::Speed)
+        && let Some(tps) = row.tps()
+    {
         let label = format!("{tps:.0} tok/s");
         let w = p.dual_measure(&fonts.small, &label);
         p.dual_text(
@@ -811,7 +850,7 @@ fn draw_card_single(
         right -= w + 10.0 * s;
     }
 
-    if row.attempt_count > 1 {
+    if v.shows(DisplayField::Retry) && row.attempt_count > 1 {
         let label = format!("{}×", row.attempt_count - 1);
         let w = p.dual_measure(&fonts.small, &label) + 6.0;
         p.dual_text(
@@ -836,41 +875,47 @@ fn draw_card_single(
     // the row's identity — always follows, filling whatever room remains.
     let mut x = rect.x + c.inner_pad;
 
-    // Status marks, drawn as a group — showing 透 without 转 would
-    // misrepresent the row, so either all three fit or none are drawn.
-    let marks: [(&str, u32); 3] = [
-        (
+    // Status marks. They are drawn as one group so they stay aligned with each
+    // other, but each mark can be switched off in settings; the group is only
+    // dropped whole when it does not fit the room left on the line.
+    let mut marks: Vec<(&str, u32)> = Vec::with_capacity(3);
+    if v.shows(DisplayField::Stream) {
+        marks.push((
             "流",
             if row.stream {
                 theme::WHITE
             } else {
                 theme::TEXT_FAINT
             },
-        ),
-        (
+        ));
+    }
+    if v.shows(DisplayField::Conversion) {
+        marks.push((
             "转",
             if row.protocol().is_converted() {
                 theme::YELLOW
             } else {
                 theme::GREEN
             },
-        ),
-        (
+        ));
+    }
+    if v.shows(DisplayField::PassThrough) {
+        marks.push((
             "透",
             if row.pass_through {
                 theme::GREEN
             } else {
                 theme::GRAY
             },
-        ),
-    ];
+        ));
+    }
     let mark_gap = 1.0 * s;
     let marks_w: f32 = marks
         .iter()
         .map(|(mark, _)| p.dual_measure(&fonts.body, mark) + mark_gap)
         .sum::<f32>()
         - mark_gap;
-    if x + marks_w <= limit {
+    if !marks.is_empty() && x + marks_w <= limit {
         for (mark, color) in &marks {
             let w = p.dual_measure(&fonts.body, mark);
             p.dual_text(
@@ -891,7 +936,9 @@ fn draw_card_single(
     // Interface type (chat/responses/messages): the protocol the client spoke.
     // Placed right after the marks, before the model name, so its position is
     // also fixed rather than trailing a variable-width chip.
-    if let Some(name) = &row.format {
+    if v.shows(DisplayField::Protocol)
+        && let Some(name) = &row.format
+    {
         let w = p.dual_measure(&fonts.small, name);
         if x + w < limit {
             p.dual_text(
@@ -910,7 +957,9 @@ fn draw_card_single(
 
     // Channel: drawn before the model name so its position is fixed too, right
     // after the interface type, rather than trailing the variable-width chip.
-    if let Some(channel) = &row.channel {
+    if v.shows(DisplayField::Channel)
+        && let Some(channel) = &row.channel
+    {
         let color = ch_palette
             .iter()
             .find(|(n, _)| *n == channel.as_str())
@@ -932,31 +981,35 @@ fn draw_card_single(
         }
     }
 
-    // Model chip last: it is the row's identity, always drawn and compressed
-    // to whatever room the fixed-width prefix above leaves for it.
-    let display = row.display_model();
-    let model_color = mdl_palette
-        .iter()
-        .find(|(n, _)| *n == row.served_model())
-        .map(|(_, c)| *c)
-        .unwrap_or(theme::TEXT);
-    let chip_w =
-        (p.dual_measure(&fonts.small, &display) + c.chip_hpad * 2.0).min((limit - x).max(0.0));
-    p.round_rect(x, chip_y, chip_w, chip_h, 3.0 * s, theme::BORDER, true);
-    p.dual_text(
-        &fonts.small,
-        &display,
-        x + c.chip_hpad,
-        small_y,
-        (chip_w - c.chip_hpad * 2.0).max(0.0),
-        c.line2,
-        model_color,
-        theme::ALIGN_NEAR,
-    );
-    x += chip_w + gap;
+    // Model chip: the row's identity, drawn last so it is compressed to
+    // whatever room the fixed-width prefix above leaves for it.
+    if v.shows(DisplayField::Model) {
+        let display = row.display_model();
+        let model_color = mdl_palette
+            .iter()
+            .find(|(n, _)| *n == row.served_model())
+            .map(|(_, c)| *c)
+            .unwrap_or(theme::TEXT);
+        let chip_w =
+            (p.dual_measure(&fonts.small, &display) + c.chip_hpad * 2.0).min((limit - x).max(0.0));
+        p.round_rect(x, chip_y, chip_w, chip_h, 3.0 * s, theme::BORDER, true);
+        p.dual_text(
+            &fonts.small,
+            &display,
+            x + c.chip_hpad,
+            small_y,
+            (chip_w - c.chip_hpad * 2.0).max(0.0),
+            c.line2,
+            model_color,
+            theme::ALIGN_NEAR,
+        );
+        x += chip_w + gap;
+    }
 
     // Caller (API key name).
-    if let Some(caller) = &row.caller {
+    if v.shows(DisplayField::Caller)
+        && let Some(caller) = &row.caller
+    {
         let w = p.dual_measure(&fonts.small, caller);
         if x + w < limit {
             p.dual_text(
@@ -974,7 +1027,7 @@ fn draw_card_single(
     }
 
     // Tokens.
-    if row.total_tokens > 0 {
+    if v.shows(DisplayField::Tokens) && row.total_tokens > 0 {
         let tokens = fmt::tokens_compact(row.total_tokens);
         let w = p.dual_measure(&fonts.small, &tokens);
         if x + w < limit {
@@ -993,7 +1046,9 @@ fn draw_card_single(
     }
 
     // Cache hit rate.
-    if let Some(rate) = row.cache_hit_rate() {
+    if v.shows(DisplayField::Cache)
+        && let Some(rate) = row.cache_hit_rate()
+    {
         let label = format!("{rate:.2}%");
         let w = p.dual_measure(&fonts.small, &label);
         if x + w < limit {
@@ -1091,6 +1146,7 @@ mod tests {
             accounts: &[],
             pinned,
             filter: model::FILTER_NONE,
+            hidden_fields: &[],
         }
     }
 

@@ -1708,6 +1708,7 @@ fn paint(hwnd: HWND) {
                         accounts: &s.app.accounts,
                         pinned: s.app.config.pin_position,
                         filter: s.app.filter,
+                        hidden_fields: &s.app.config.hidden_fields,
                     };
                     panel::draw(&painter, &s.fonts, m, &view);
                 }
@@ -2071,6 +2072,7 @@ fn list_view(s: &State) -> ListView<'_> {
         accounts: &s.app.accounts,
         pinned: s.app.config.pin_position,
         filter: s.app.filter,
+        hidden_fields: &s.app.config.hidden_fields,
     }
 }
 
