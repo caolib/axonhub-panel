@@ -63,32 +63,41 @@ const NAME_PALETTE: [u32; 9] = [
     0xFFFF_6B6B,   // 8: coral
 ];
 
-/// Map each distinct channel in `rows` to a palette colour. The first channel
-/// seen gets the default light blue; later channels cycle through the rest.
+/// Hand the palette out to `names`, which are listed newest first, so the
+/// assignment runs the other way: the oldest name on the page keeps the default
+/// light blue. New rows arrive at the top, and a name already on the page keeps
+/// its colour when one appears above it.
+fn rank_palette(names: &mut [(&str, u32)]) {
+    let count = names.len();
+    for (i, (_, color)) in names.iter_mut().enumerate() {
+        *color = NAME_PALETTE[(count - 1 - i) % NAME_PALETTE.len()];
+    }
+}
+
+/// Map each distinct channel in `rows` (newest first) to a palette colour.
 fn channel_palette(rows: &[Row]) -> Vec<(&str, u32)> {
     let mut map: Vec<(&str, u32)> = Vec::new();
     for row in rows {
         if let Some(ch) = &row.channel {
             if !map.iter().any(|(n, _)| *n == ch.as_str()) {
-                let color = NAME_PALETTE[map.len() % NAME_PALETTE.len()];
-                map.push((ch.as_str(), color));
+                map.push((ch.as_str(), 0));
             }
         }
     }
+    rank_palette(&mut map);
     map
 }
 
-/// Map each distinct served model in `rows` to a palette colour. The first
-/// model gets the default light blue; later models cycle through the rest.
+/// Map each distinct served model in `rows` (newest first) to a palette colour.
 fn model_palette(rows: &[Row]) -> Vec<(&str, u32)> {
     let mut map: Vec<(&str, u32)> = Vec::new();
     for row in rows {
         let model = row.served_model();
         if !map.iter().any(|(n, _)| *n == model) {
-            let color = NAME_PALETTE[map.len() % NAME_PALETTE.len()];
-            map.push((model, color));
+            map.push((model, 0));
         }
     }
+    rank_palette(&mut map);
     map
 }
 

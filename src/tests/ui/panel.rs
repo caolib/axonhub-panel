@@ -136,6 +136,99 @@ fn only_cards_with_something_to_explain_are_clickable() {
     assert_eq!(hit_error_row(m, &pinned, 100.0, middle(2)), None);
 }
 
+fn channel_row(channel: &str) -> Row {
+    let mut r = row(Status::Completed);
+    r.channel = Some(channel.to_string());
+    r
+}
+
+fn model_row(model: &str) -> Row {
+    let mut r = row(Status::Completed);
+    r.model = model.to_string();
+    r
+}
+
+/// The color `name` is drawn with, or `None` when it is not on the page.
+fn color_of<'a>(palette: &'a [(&'a str, u32)], name: &str) -> Option<u32> {
+    palette.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
+}
+
+#[test]
+fn the_oldest_channel_keeps_the_default_colour() {
+    // `rows` is newest first, as `App::rebuild` leaves it. The palette runs the
+    // other way, so the bottom-most card is the one that gets the default blue.
+    let rows = vec![channel_row("B"), channel_row("A")];
+    let palette = channel_palette(&rows);
+    assert_eq!(color_of(&palette, "A"), Some(NAME_PALETTE[0]));
+    assert_eq!(color_of(&palette, "B"), Some(NAME_PALETTE[1]));
+}
+
+#[test]
+fn a_new_channel_does_not_repaint_the_cards_already_shown() {
+    let old = vec![channel_row("B"), channel_row("A")];
+    let new = vec![channel_row("C"), channel_row("B"), channel_row("A")];
+    let before = channel_palette(&old);
+    let after = channel_palette(&new);
+    for (name, color) in before {
+        assert_eq!(
+            color_of(&after, name),
+            Some(color),
+            "{name} changed colour when a newer channel arrived"
+        );
+    }
+    assert_eq!(color_of(&after, "C"), Some(NAME_PALETTE[2]));
+}
+
+#[test]
+fn a_new_model_does_not_repaint_the_cards_already_shown() {
+    let old = vec![model_row("b"), model_row("a")];
+    let new = vec![model_row("c"), model_row("b"), model_row("a")];
+    let before = model_palette(&old);
+    let after = model_palette(&new);
+    for (name, color) in before {
+        assert_eq!(
+            color_of(&after, name),
+            Some(color),
+            "{name} changed colour when a newer model arrived"
+        );
+    }
+    assert_eq!(color_of(&after, "a"), Some(NAME_PALETTE[0]));
+    assert_eq!(color_of(&after, "c"), Some(NAME_PALETTE[2]));
+}
+
+#[test]
+fn models_are_keyed_by_what_served_them() {
+    // A routed request is coloured by the model that served it, not the one asked for.
+    let mut routed = model_row("asked");
+    routed.routed_model = Some("served".to_string());
+    let rows = vec![routed, model_row("a")];
+    let palette = model_palette(&rows);
+    assert_eq!(color_of(&palette, "served"), Some(NAME_PALETTE[1]));
+    assert_eq!(color_of(&palette, "asked"), None);
+    assert_eq!(color_of(&palette, "a"), Some(NAME_PALETTE[0]));
+}
+
+#[test]
+fn rows_without_a_channel_do_not_consume_a_colour() {
+    let rows = vec![row(Status::Completed), channel_row("A")];
+    let palette = channel_palette(&rows);
+    assert_eq!(palette.len(), 1);
+    assert_eq!(color_of(&palette, "A"), Some(NAME_PALETTE[0]));}
+
+#[test]
+fn the_palette_wraps_past_its_last_entry() {
+    // Newest first: n10 is at the top, n1 at the bottom. Ten names over nine
+    // colours means the two ends collide, and every other name still shifts by
+    // exactly one slot.
+    let rows: Vec<Row> = (1..=10).rev().map(|i| channel_row(&format!("n{i}"))).collect();
+    let palette = channel_palette(&rows);
+    assert_eq!(palette.len(), 10);
+    assert_eq!(color_of(&palette, "n1"), Some(NAME_PALETTE[0]));
+    assert_eq!(color_of(&palette, "n2"), Some(NAME_PALETTE[1]));
+    assert_eq!(color_of(&palette, "n9"), Some(NAME_PALETTE[8]));
+    assert_eq!(color_of(&palette, "n10"), Some(NAME_PALETTE[0]));
+}
+
 #[test]
 fn filter_matches_status() {
     // The empty mask shows everything, including Canceled.
