@@ -804,6 +804,18 @@ impl Layout {
         text(
             Rect {
                 x: 24.0,
+                y: 14.0,
+                w: self.width - 48.0,
+                h: 24.0,
+            },
+            concat!("v", env!("CARGO_PKG_VERSION")),
+            false,
+            theme::TEXT_DIM,
+            theme::ALIGN_FAR,
+        );
+        text(
+            Rect {
+                x: 24.0,
                 y: 38.0,
                 w: self.width - 48.0,
                 h: 20.0,
