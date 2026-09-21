@@ -46,6 +46,12 @@ pub enum Update {
         id: String,
         result: Result<Vec<ExecutionDetail>, ApiError>,
     },
+    /// Answer to `TestAccount`: the account's total request count on success,
+    /// or why it could not be reached.
+    Probe {
+        id: String,
+        result: Result<i64, String>,
+    },
     Failed(ApiError),
     /// No account has a usable token; the UI must show the sign-in form.
     SignedOut,
@@ -100,6 +106,11 @@ pub enum Command {
     FetchDetail {
         account: String,
         id: String,
+    },
+    /// Ask one account for a single request, purely to report whether its
+    /// credentials still work. The answer never reaches the list.
+    TestAccount {
+        account: String,
     },
     Shutdown,
 }
@@ -175,6 +186,7 @@ fn apply_command(
     force: &mut bool,
     pending_creds: &mut Option<(String, Credentials)>,
     pending_detail: &mut Option<(String, String)>,
+    pending_probe: &mut Option<String>,
 ) -> bool {
     match command {
         Command::Shutdown => return true,
@@ -198,6 +210,7 @@ fn apply_command(
             *force = true;
         }
         Command::FetchDetail { account, id } => *pending_detail = Some((account, id)),
+        Command::TestAccount { account } => *pending_probe = Some(account),
     }
     false
 }
@@ -216,6 +229,7 @@ fn run(
     let mut force = true;
     let mut pending_creds: Option<(String, Credentials)> = None;
     let mut pending_detail: Option<(String, String)> = None;
+    let mut pending_probe: Option<String> = None;
     let mut next_poll = Instant::now();
     // Emit the signed-out notice once per transition rather than every idle
     // tick, which would otherwise force a pointless repaint each second.
@@ -235,6 +249,7 @@ fn run(
                 &mut force,
                 &mut pending_creds,
                 &mut pending_detail,
+                &mut pending_probe,
             ) {
                 shutdown = true;
             }
@@ -267,6 +282,35 @@ fn run(
                 warn!("获取请求详情失败 (id={}): {}", id, e.message());
             }
             let _ = updates.send(Update::Detail { id, result });
+        }
+
+        // Served inline too: the user is watching the settings window for the
+        // answer, and the test is a single request. A token the poll already
+        // dropped counts as "no credentials" rather than a failed round trip.
+        if let Some(account) = pending_probe.take() {
+            let target = targets.iter().find(|t| t.id == account);
+            let result = match target.and_then(|t| t.token.clone()) {
+                Some(token) => {
+                    let target = target.expect("checked");
+                    client
+                        .fetch_requests(
+                            &target.graphql_url(),
+                            &token,
+                            &target.project_id,
+                            1,
+                        )
+                        .map(|(_, total)| total)
+                        .map_err(|e| e.message())
+                }
+                None => Err("该账号没有可用凭据，请重新登录".into()),
+            };
+            if let Err(message) = &result {
+                warn!("测试账号失败 ({}): {}", account, message);
+            }
+            let _ = updates.send(Update::Probe {
+                id: account,
+                result,
+            });
         }
 
         if let Some((account, creds)) = pending_creds.take() {
@@ -411,6 +455,7 @@ fn run(
                         &mut force,
                         &mut pending_creds,
                         &mut pending_detail,
+                        &mut pending_probe,
                     ) {
                         return;
                     }

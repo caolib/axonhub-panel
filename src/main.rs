@@ -1582,6 +1582,7 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 // signed in again with a fresh token.
                 State::with(|s| {
                     s.app.stored = Stored::default();
+                    s.app.probe = None;
                     send_targets(s);
                     let target = match s.app.accounts.first() {
                         Some(account) => LoginTarget::Account(account.id.clone()),
@@ -1706,6 +1707,7 @@ fn paint(hwnd: HWND) {
                         status_text: s.app.status.clone(),
                         user: s.app.user_name.as_deref(),
                         accounts: &s.app.accounts,
+                        settings_alert: s.app.needs_signin(),
                         pinned: s.app.config.pin_position,
                         filter: s.app.filter,
                         hidden_fields: &s.app.config.hidden_fields,
@@ -2070,6 +2072,7 @@ fn list_view(s: &State) -> ListView<'_> {
         status_text: None,
         user: None,
         accounts: &s.app.accounts,
+        settings_alert: s.app.needs_signin(),
         pinned: s.app.config.pin_position,
         filter: s.app.filter,
         hidden_fields: &s.app.config.hidden_fields,

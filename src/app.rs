@@ -25,6 +25,24 @@ pub enum LoginTarget {
     Account(String),
 }
 
+/// A "test this account" round trip the user asked for from the settings
+/// window, and what came back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Probe {
+    pub id: String,
+    pub state: ProbeState,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProbeState {
+    /// Waiting for the worker's answer.
+    Running,
+    /// The account answered; the number is its total request count.
+    Ok(i64),
+    /// The account could not be reached, or has no credentials left.
+    Failed(String),
+}
+
 pub struct App {
     pub view: View,
     pub config: Config,
@@ -50,6 +68,8 @@ pub struct App {
     pub open_accounts: Vec<String>,
     /// Accounts that did not, with the reason.
     pub issues: Vec<AccountIssue>,
+    /// The last account test, if one has been run.
+    pub probe: Option<Probe>,
     /// What the last successful sign-in should be persisted as.
     pub stored: Stored,
 }
@@ -72,6 +92,7 @@ impl App {
             login: None,
             open_accounts: Vec::new(),
             issues: Vec::new(),
+            probe: None,
             stored: Stored::default(),
             config,
         }
@@ -108,6 +129,20 @@ impl App {
         } else {
             "连接失败"
         })
+    }
+
+    /// Whether any account is waiting on a fresh sign-in — an expired or
+    /// rejected token. The settings button is drawn red while this holds.
+    pub fn needs_signin(&self) -> bool {
+        self.issues.iter().any(|i| i.needs_signin)
+    }
+
+    /// Start tracking a test for one account, replacing any previous result.
+    pub fn begin_probe(&mut self, id: &str) {
+        self.probe = Some(Probe {
+            id: id.to_string(),
+            state: ProbeState::Running,
+        });
     }
 
     /// Apply everything the worker produced.
@@ -174,6 +209,17 @@ impl App {
                 Update::Detail { .. } => {
                     // Consumed by the window layer, which owns the detail popup;
                     // `App` holds list state only.
+                }
+                Update::Probe { id, result } => {
+                    // A late answer for an account the user has since tested
+                    // again (or signed into) is dropped rather than painted over
+                    // the newer state.
+                    if let Some(probe) = self.probe.as_mut().filter(|p| p.id == id) {
+                        probe.state = match result {
+                            Ok(total) => ProbeState::Ok(total),
+                            Err(message) => ProbeState::Failed(message),
+                        };
+                    }
                 }
                 Update::Failed(err) => {
                     // The login view does not render the status line, so a failed

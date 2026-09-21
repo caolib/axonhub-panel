@@ -165,6 +165,9 @@ pub struct ListView<'a> {
     pub user: Option<&'a str>,
     /// Saved accounts; more than one means every card is tagged with its own.
     pub accounts: &'a [Account],
+    /// An account is waiting on a fresh sign-in: the settings button turns red,
+    /// since re-signing in is what fixes it.
+    pub settings_alert: bool,
     pub pinned: bool,
     /// Selected status-filter bits; the header chips highlight against this.
     pub filter: FilterMask,
@@ -218,13 +221,20 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         v.rows.len()
     };
     let settings = settings_button(m);
+    // A red pill is the panel's only hint that an account needs attention, so
+    // it stays red until the account signs in again.
+    let (settings_fill, settings_text) = if v.settings_alert {
+        (theme::with_alpha(theme::RED, 0x38), theme::RED)
+    } else {
+        (theme::CARD_HOVER, theme::TEXT_DIM)
+    };
     p.round_rect(
         settings.x,
         settings.y,
         settings.w,
         settings.h,
         3.0 * s,
-        theme::CARD_HOVER,
+        settings_fill,
         true,
     );
     p.dual_text(
@@ -234,7 +244,7 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         settings.y,
         settings.w,
         settings.h,
-        theme::TEXT_DIM,
+        settings_text,
         theme::ALIGN_CENTER,
     );
     let right = settings.x - 8.0 * s;
@@ -1144,6 +1154,7 @@ mod tests {
             status_text: None,
             user: None,
             accounts: &[],
+            settings_alert: false,
             pinned,
             filter: model::FILTER_NONE,
             hidden_fields: &[],

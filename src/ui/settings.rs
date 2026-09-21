@@ -1,6 +1,6 @@
 //! Settings content and geometry, shared by painting, pointer and keyboard input.
 
-use crate::app::App;
+use crate::app::{App, ProbeState};
 use crate::config::{CredentialMode, DisplayField, HiddenChannel};
 use crate::font_catalog::InstalledFont;
 use crate::theme::{self, Fonts, Painter};
@@ -38,6 +38,8 @@ pub enum Action {
     Bottommost,
     AddAccount,
     Login(String),
+    /// Ask the worker to prove one account's credentials still work.
+    TestAccount(String),
     RemoveAccount(String),
     CredentialMode(CredentialMode),
     ClearCredentials,
@@ -97,6 +99,9 @@ struct Label {
     rect: Rect,
     text: String,
     heading: bool,
+    /// Overrides the default text colour, for labels that carry a verdict
+    /// (green when an account answers, red when it does not).
+    color: Option<u32>,
 }
 
 pub struct Layout {
@@ -131,7 +136,7 @@ impl Layout {
             (Tab::Fonts, "字体".to_string()),
             (
                 Tab::Accounts,
-                format!("账号与凭据 · {}", app.accounts.len()),
+                format!("账号 · {}", app.accounts.len()),
             ),
             (Tab::Channels, "渠道过滤".to_string()),
         ]
@@ -270,6 +275,10 @@ impl Layout {
     }
 
     fn label(&mut self, y: f32, text: impl Into<String>, heading: bool) {
+        self.label_colored(y, text, heading, None);
+    }
+
+    fn label_colored(&mut self, y: f32, text: impl Into<String>, heading: bool, color: Option<u32>) {
         self.labels.push(Label {
             rect: Rect {
                 x: 24.0,
@@ -279,6 +288,7 @@ impl Layout {
             },
             text: text.into(),
             heading,
+            color,
         });
     }
 
@@ -444,17 +454,49 @@ impl Layout {
         for account in &app.accounts {
             self.label(y, &account.name, true);
             self.label(y + 22.0, &account.endpoint, false);
-            let status = app.account_state(&account.id).unwrap_or_else(|| {
-                if app.open_accounts.contains(&account.id) {
-                    "已连接"
-                } else {
-                    "等待连接"
-                }
-            });
-            self.label(y + 44.0, status, false);
+            // A test result, while it is the freshest thing known about the
+            // account, stands in for the poll's own verdict.
+            let probe = app.probe.as_ref().filter(|p| p.id == account.id);
+            let (status, status_color) = match probe.map(|p| &p.state) {
+                Some(ProbeState::Running) => ("正在测试连接…".to_string(), None),
+                Some(ProbeState::Ok(total)) => (
+                    format!("连接正常 · 共 {total} 条请求"),
+                    Some(theme::GREEN),
+                ),
+                Some(ProbeState::Failed(message)) => (
+                    format!("测试失败 · {message}"),
+                    Some(theme::RED),
+                ),
+                None => (
+                    app.account_state(&account.id)
+                        .unwrap_or_else(|| {
+                            if app.open_accounts.contains(&account.id) {
+                                "已连接"
+                            } else {
+                                "等待连接"
+                            }
+                        })
+                        .to_string(),
+                    None,
+                ),
+            };
+            self.label_colored(y + 44.0, status, false, status_color);
             for label in self.labels.iter_mut().rev().take(3) {
-                label.rect.w -= 104.0;
+                label.rect.w -= 208.0;
             }
+            self.button(
+                Rect {
+                    x: self.width - 224.0,
+                    y,
+                    w: 96.0,
+                    h: 30.0,
+                },
+                "测试连接",
+                Action::TestAccount(account.id.clone()),
+                false,
+                false,
+                true,
+            );
             self.button(
                 Rect {
                     x: self.width - 120.0,
@@ -828,11 +870,11 @@ impl Layout {
                 r,
                 &label.text,
                 label.heading,
-                if label.heading {
+                label.color.unwrap_or(if label.heading {
                     theme::TEXT
                 } else {
                     theme::TEXT_DIM
-                },
+                }),
                 theme::ALIGN_NEAR,
             );
         }

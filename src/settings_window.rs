@@ -18,6 +18,7 @@ use crate::theme::Fonts;
 use crate::ui::font_search::{self, SearchBox};
 use crate::ui::login::LoginForm;
 use crate::ui::settings::{self, Action, Layout};
+use crate::worker::Command;
 use crate::{Action as PanelAction, State as PanelState, invalidate};
 
 pub struct Popup {
@@ -648,7 +649,22 @@ fn dispatch(hwnd: HWND, action: Action) {
         Action::Refresh => crate::on_command(WPARAM(crate::MENU_REFRESH), &mut actions),
         Action::OpenRequests => crate::on_command(WPARAM(crate::MENU_OPEN), &mut actions),
         Action::AddAccount => begin_login(owner, LoginTarget::Add),
-        Action::Login(id) => begin_login(owner, LoginTarget::Account(id)),
+        Action::Login(id) => {
+            // Editing an account starts a fresh round with it; a stale test
+            // verdict would only be noise on the form that replaces this list.
+            PanelState::with(|s| {
+                if s.app.probe.as_ref().is_some_and(|p| p.id == id) {
+                    s.app.probe = None;
+                }
+            });
+            begin_login(owner, LoginTarget::Account(id));
+        }
+        Action::TestAccount(id) => {
+            PanelState::with(|s| {
+                s.app.begin_probe(&id);
+                s.worker.send(Command::TestAccount { account: id.clone() });
+            });
+        }
         Action::RemoveAccount(_) | Action::ClearCredentials => {
             PanelState::with(|s| {
                 if let Some(p) = s.settings.as_mut() {
@@ -675,7 +691,14 @@ fn dispatch(hwnd: HWND, action: Action) {
             })
             .flatten();
             match pending {
-                Some(Action::RemoveAccount(id)) => actions.push(PanelAction::RemoveAccount(id)),
+                Some(Action::RemoveAccount(id)) => {
+                    PanelState::with(|s| {
+                        if s.app.probe.as_ref().is_some_and(|p| p.id == id) {
+                            s.app.probe = None;
+                        }
+                    });
+                    actions.push(PanelAction::RemoveAccount(id));
+                }
                 Some(Action::ClearCredentials) => actions.push(PanelAction::ClearCredentials),
                 _ => {}
             }
