@@ -7,3 +7,8 @@
 # it; both stay local as test fixtures.
 /请求.txt
 /响应.json
+
+# Local profile data. credentials.bin holds DPAPI-encrypted secrets and must
+# never be committed; config.json can leak an endpoint, so keep it out too.
+/credentials.bin
+/config.json

@@ -680,7 +680,7 @@ mod tests {
     fn preserved_text_is_byte_exact() {
         // Concatenating the runs must reproduce the input, or text would be
         // silently mangled when drawn piecewise.
-        for s in ["缓存 99.5%", "5 分钟前", "cc · caolib", "透传", "abc", ""] {
+        for s in ["缓存 99.5%", "5 分钟前", "cc · alice", "透传", "abc", ""] {
             let joined: String = runs(s).into_iter().map(|(t, _)| t).collect();
             assert_eq!(joined, s, "round trip failed for {s:?}");
         }
