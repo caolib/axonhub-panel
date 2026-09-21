@@ -15,7 +15,7 @@ cargo clippy --all-targets   # 代码质量检查（需已装 clippy）
 cargo fmt                    # 格式化
 ```
 
-测试全部以内联 `#[cfg(test)] mod tests` 形式写在各源文件里（无 `dev-dependencies`，纯 std），`cargo test` 直接跑。注意 `Worker::run` 涉及真实网络，测试只覆盖纯逻辑（解析、布局、格式、配置）。
+测试集中放在 `src/tests/`：`src/tests/*.rs` 对应根模块，`src/tests/ui/*.rs` 对应 UI 模块，源文件里以 `#[cfg(test)] #[path = ...] mod tests;` 引用。测试仍是各模块的子模块（`use super::*` 照旧），所以能访问私有函数。无 `dev-dependencies`，纯 std，`cargo test` 直接跑。注意 `Worker::run` 涉及真实网络，测试只覆盖纯逻辑（解析、布局、格式、配置）。
 
 `Cargo.toml` 的 `[profile.release]` 设了 `opt-level="z"`、`lto=true`、`panic="abort"`、`strip=true`——发布构建体积敏感，改 profile 需谨慎。
 
