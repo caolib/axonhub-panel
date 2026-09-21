@@ -89,9 +89,7 @@ mod tests {
     /// A token with the same shape as one AxonHub issues, but the signature is
     /// a placeholder: never paste a real token here, a JWT is a live credential
     /// and this file is version controlled.
-    const SAMPLE: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
-eyJleHAiOjE3ODkxODMzMDIsInVzZXJfaWQiOjF9.\
-c2lnbmF0dXJlLXBsYWNlaG9sZGVyLW5vdC1hLXJlYWwta2V5";
+    const SAMPLE: &str = "eyJhbGciOi...";
 
     #[test]
     fn reads_expiry_from_a_real_axonhub_token() {
