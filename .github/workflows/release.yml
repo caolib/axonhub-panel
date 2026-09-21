@@ -1,0 +1,55 @@
+name: Release
+
+# 推送 v* 标签（如 v0.1.0）时触发:测试 -> release 构建 -> 建 Release 并附上 exe
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    # 纯 Windows 二进制 crate,只能在 Windows 上构建
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 使用最新 Rust stable
+        shell: bash
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: 缓存 Cargo 与 target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: 运行测试
+        run: cargo test --locked
+
+      - name: 构建 release 产物
+        run: cargo build --release --locked
+
+      - name: 创建 Release 并上传 exe
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            target/release/ah-panel.exe \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
