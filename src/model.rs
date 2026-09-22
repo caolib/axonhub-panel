@@ -337,9 +337,7 @@ impl Row {
             attempts_truncated: req
                 .executions
                 .as_ref()
-                .map(|c| {
-                    c.total_count.unwrap_or(0) > c.edges.len() as i64
-                })
+                .map(|c| c.total_count.unwrap_or(0) > c.edges.len() as i64)
                 .unwrap_or(false),
         }
     }

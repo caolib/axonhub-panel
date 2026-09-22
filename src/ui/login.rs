@@ -135,7 +135,6 @@ impl LoginForm {
         }
     }
 
-
     /// Whether the field shows its value as asterisks.
     pub fn masked(field: Field) -> bool {
         field == Field::Password
@@ -460,12 +459,7 @@ impl LoginForm {
                 Field::Password,
                 Field::Remember,
             ],
-            Method::Token => &[
-                Field::Name,
-                Field::Endpoint,
-                Field::Token,
-                Field::Remember,
-            ],
+            Method::Token => &[Field::Name, Field::Endpoint, Field::Token, Field::Remember],
         };
         let index = order.iter().position(|f| *f == self.focus).unwrap_or(0);
         let len = order.len();
@@ -630,7 +624,14 @@ fn index_at_x(p: &Painter, fonts: &theme::Fonts, shown: &str, local_x: f32) -> u
 const CARET_MARGIN: f32 = 8.0;
 
 /// Draw a rounded text input, with its selection and caret when focused.
-fn text_field(p: &Painter, fonts: &theme::Fonts, rect: Rect, row: &FieldView, focused: bool, caret_on: bool) {
+fn text_field(
+    p: &Painter,
+    fonts: &theme::Fonts,
+    rect: Rect,
+    row: &FieldView,
+    focused: bool,
+    caret_on: bool,
+) {
     p.dual_text(
         &fonts.small,
         row.label,
@@ -736,8 +737,8 @@ fn text_field(p: &Painter, fonts: &theme::Fonts, rect: Rect, row: &FieldView, fo
     }
 
     if focused && caret_on {
-        let caret_x = (text_x - offset + width_up_to(p, fonts, &shown, caret))
-            .min(rect.x + rect.w - 6.0 * s);
+        let caret_x =
+            (text_x - offset + width_up_to(p, fonts, &shown, caret)).min(rect.x + rect.w - 6.0 * s);
         p.fill_rect(
             caret_x,
             rect.y + 7.0 * s,
@@ -765,12 +766,10 @@ pub fn place_caret(
     press: bool,
 ) -> bool {
     let l = layout(form, m);
-    let Some((field, rect)) = l
-        .fields
-        .iter()
-        .enumerate()
-        .find_map(|(i, (rect, _))| rect.contains(x, y).then_some((field_for(form.method, i), *rect)))
-    else {
+    let Some((field, rect)) = l.fields.iter().enumerate().find_map(|(i, (rect, _))| {
+        rect.contains(x, y)
+            .then_some((field_for(form.method, i), *rect))
+    }) else {
         return false;
     };
     let before = (form.focus, form.caret, form.anchor);
@@ -853,7 +852,14 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
     if form.return_to_settings {
         let r = back_button(form, m);
         p.dual_text(
-            &fonts.small, "返回设置", r.x, r.y, r.w, r.h, theme::MAUVE, theme::ALIGN_FAR,
+            &fonts.small,
+            "返回设置",
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            theme::MAUVE,
+            theme::ALIGN_FAR,
         );
     }
 

@@ -8,7 +8,7 @@
 //! single list. Each request carries the account it came from, so the UI can
 //! label it.
 
-use std::sync::mpsc::{RecvTimeoutError, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use crate::client::{ApiError, Client, SignInResponse};
@@ -293,12 +293,7 @@ fn run(
                 Some(token) => {
                     let target = target.expect("checked");
                     client
-                        .fetch_requests(
-                            &target.graphql_url(),
-                            &token,
-                            &target.project_id,
-                            1,
-                        )
+                        .fetch_requests(&target.graphql_url(), &token, &target.project_id, 1)
                         .map(|(_, total)| total)
                         .map_err(|e| e.message())
                 }
@@ -369,7 +364,11 @@ fn run(
                         cycle.open.push(target.id.clone());
                     }
                     Err(err) => {
-                        warn!("轮询 AxonHub 请求失败 (账号 {}): {}", target.name, err.message());
+                        warn!(
+                            "轮询 AxonHub 请求失败 (账号 {}): {}",
+                            target.name,
+                            err.message()
+                        );
                         let needs_signin = err.needs_signin();
                         if needs_signin {
                             // The token is worse than useless: drop it so the

@@ -4,12 +4,12 @@
 //! process lifetime: a full repaint draws a few hundred strings, and building
 //! GDI+ objects per call would be pure waste at any cadence.
 
+use std::marker::PhantomData;
 use windows::Win32::Graphics::Gdi::HDC;
 use windows::Win32::Graphics::GdiPlus::*;
 pub use windows::Win32::Graphics::GdiPlus::{
     GpBrush, GpFont, GpFontFamily, GpGraphics, GpPath, GpPen, GpSolidFill, GpStringFormat, RectF,
 };
-use std::marker::PhantomData;
 use windows::core::PCWSTR;
 
 // --- palette (dark theme, aligned with the AxonHub console) ---
@@ -114,7 +114,9 @@ pub struct Fonts {
 /// First family in `names` that the system can resolve, or null if none can.
 fn pick(names: &[&str]) -> *mut GpFontFamily {
     for name in names {
-        if name.trim().is_empty() { continue; }
+        if name.trim().is_empty() {
+            continue;
+        }
         let f = family(name);
         if !f.is_null() {
             return f;
@@ -154,11 +156,15 @@ fn make_font(fam: *mut GpFontFamily, size: f32, bold: bool) -> *mut GpFont {
 
 pub fn font_available(name: &str) -> bool {
     let family = family(name);
-    if family.is_null() { return false; }
+    if family.is_null() {
+        return false;
+    }
     let font = make_font(family, 12.5, false);
     let available = !font.is_null();
     unsafe {
-        if available { GdipDeleteFont(font); }
+        if available {
+            GdipDeleteFont(font);
+        }
         GdipDeleteFontFamily(family);
     }
     available
@@ -172,8 +178,16 @@ impl Fonts {
             "Microsoft YaHei UI",
             "Segoe UI",
         ];
-        let selected = if preferred.is_empty() { std::ptr::null_mut() } else { family(preferred) };
-        let latin_family = if selected.is_null() { pick(&defaults) } else { selected };
+        let selected = if preferred.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            family(preferred)
+        };
+        let latin_family = if selected.is_null() {
+            pick(&defaults)
+        } else {
+            selected
+        };
         let cjk_family = if selected.is_null() || crate::font_catalog::supports_chinese(preferred) {
             latin_family
         } else {

@@ -102,9 +102,10 @@ impl App {
     /// whatever the form held before.
     pub fn open_login(&mut self, message: Option<String>, target: LoginTarget) {
         let form = match &target {
-            LoginTarget::Account(id) => self.config.account(id).map(|account| {
-                LoginForm::for_account(account, self.config.credential_mode)
-            }),
+            LoginTarget::Account(id) => self
+                .config
+                .account(id)
+                .map(|account| LoginForm::for_account(account, self.config.credential_mode)),
             LoginTarget::Add => None,
         };
         let mode = self.config.credential_mode;

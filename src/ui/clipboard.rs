@@ -5,7 +5,7 @@
 //! an OS facility with its own lifetime rules.
 
 use tracing::warn;
-use windows::Win32::Foundation::{GlobalFree, HGLOBAL, HANDLE};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     SetClipboardData,

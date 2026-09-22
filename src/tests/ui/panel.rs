@@ -213,14 +213,18 @@ fn rows_without_a_channel_do_not_consume_a_colour() {
     let rows = vec![row(Status::Completed), channel_row("A")];
     let palette = channel_palette(&rows);
     assert_eq!(palette.len(), 1);
-    assert_eq!(color_of(&palette, "A"), Some(NAME_PALETTE[0]));}
+    assert_eq!(color_of(&palette, "A"), Some(NAME_PALETTE[0]));
+}
 
 #[test]
 fn the_palette_wraps_past_its_last_entry() {
     // Newest first: n10 is at the top, n1 at the bottom. Ten names over nine
     // colours means the two ends collide, and every other name still shifts by
     // exactly one slot.
-    let rows: Vec<Row> = (1..=10).rev().map(|i| channel_row(&format!("n{i}"))).collect();
+    let rows: Vec<Row> = (1..=10)
+        .rev()
+        .map(|i| channel_row(&format!("n{i}")))
+        .collect();
     let palette = channel_palette(&rows);
     assert_eq!(palette.len(), 10);
     assert_eq!(color_of(&palette, "n1"), Some(NAME_PALETTE[0]));
