@@ -49,7 +49,8 @@ use windows::core::PCWSTR;
 
 use app::{App, LoginTarget, View};
 use config::{
-    Account, Config, CredentialMode, Credentials, FONT_SIZE_MAX, FONT_SIZE_MIN, Stored, WindowState,
+    Account, Config, CredentialMode, Credentials, FONT_SIZE_MAX, FONT_SIZE_MIN, OPACITY_MAX,
+    OPACITY_MIN, Stored, WindowState,
 };
 use theme::{Fonts, Painter};
 use time::now_unix;
@@ -650,7 +651,10 @@ fn main() {
         // WS_EX_NOACTIVATE is what keeps the list from stealing focus; it is
         // omitted while the sign-in form is up, since a window that is never
         // activated never receives keyboard input.
-        let mut ex_style = WS_EX_TOOLWINDOW;
+        // WS_EX_LAYERED lets `SetLayeredWindowAttributes` tune the whole-panel
+        // opacity; the alpha is set to fully opaque at startup below and
+        // adjusted from the settings field.
+        let mut ex_style = WS_EX_TOOLWINDOW | WS_EX_LAYERED;
         if !wants_focus {
             ex_style |= WS_EX_NOACTIVATE;
         }
@@ -779,6 +783,7 @@ fn main() {
                 SW_SHOWNOACTIVATE
             },
         );
+        apply_opacity(hwnd, config.opacity);
         if wants_focus {
             // Get the keyboard immediately so the user can start typing.
             let _ = SetForegroundWindow(hwnd);
@@ -981,6 +986,17 @@ fn apply_window_chrome(hwnd: HWND) {
             &dark as *const _ as *const core::ffi::c_void,
             std::mem::size_of::<i32>() as u32,
         );
+    }
+}
+
+/// Apply the panel opacity as a Win32 layered-window alpha. The window must
+/// carry `WS_EX_LAYERED` (set at creation); `SetLayeredWindowAttributes` with
+/// `LWA_ALPHA` makes the whole window translucent without touching per-pixel
+/// transparency. `opacity` is 0–100 percent; 100 is fully opaque.
+fn apply_opacity(hwnd: HWND, opacity: u8) {
+    let alpha = (opacity as u32 * 255 / 100) as u8;
+    unsafe {
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
     }
 }
 
@@ -1299,6 +1315,9 @@ enum Action {
     /// panel scales with it.
     SetFontSize(f32),
     SetFontFamily(String),
+    /// Change the panel opacity from the settings field; applied as a layered
+    /// window alpha so the whole panel becomes translucent.
+    SetOpacity(u8),
     /// Switch between the two-line and single-line card layouts. The row count
     /// is kept and the window height refitted to match.
     SetSingleLine(bool),
@@ -1450,6 +1469,14 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 // reloads fonts, resizes, clamps scroll and invalidates.
                 sync_scale(hwnd);
                 save_window_state(hwnd);
+            }
+            Action::SetOpacity(opacity) => {
+                let opacity = opacity.clamp(OPACITY_MIN, OPACITY_MAX);
+                State::with(|s| {
+                    s.app.config.opacity = opacity;
+                    s.app.save();
+                });
+                apply_opacity(hwnd, opacity);
             }
             Action::SetSingleLine(on) => {
                 State::with(|s| s.app.config.single_line = on);

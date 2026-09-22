@@ -1,7 +1,10 @@
 //! Settings content and geometry, shared by painting, pointer and keyboard input.
 
 use crate::app::{App, ProbeState};
-use crate::config::{CredentialMode, DisplayField, FONT_SIZE_MAX, FONT_SIZE_MIN, HiddenChannel};
+use crate::config::{
+    CredentialMode, DisplayField, FONT_SIZE_MAX, FONT_SIZE_MIN, HiddenChannel, OPACITY_MAX,
+    OPACITY_MIN,
+};
 use crate::font_catalog::InstalledFont;
 use crate::theme::{self, Fonts, Painter};
 use crate::ui::layout::Rect;
@@ -33,6 +36,10 @@ pub enum Action {
     FontSizeInput,
     /// Apply what the font-size box holds; unparsable input reverts.
     SaveFontSize,
+    /// The opacity cell, covered by a native edit box that types the number.
+    OpacityInput,
+    /// Apply what the opacity box holds; unparsable input reverts.
+    SaveOpacity,
     FontFamily(String),
     FontSearch,
     SingleLine,
@@ -385,44 +392,79 @@ impl Layout {
             format!("输入 {FONT_SIZE_MIN}–{FONT_SIZE_MAX} 之间的数值(可含小数),点保存生效"),
             false,
         );
+        self.label(196.0, format!("面板透明度 · 当前 {}%", c.opacity), true);
+        // This cell is a native edit box; the control below only carries its
+        // geometry so painting and Tab order agree.
+        self.controls.push(Control {
+            rect: Rect {
+                x: 24.0,
+                y: 228.0,
+                w: 120.0,
+                h: 30.0,
+            },
+            label: String::new(),
+            action: Action::OpacityInput,
+            selected: false,
+            danger: false,
+            body: true,
+            check: false,
+        });
+        self.button(
+            Rect {
+                x: 152.0,
+                y: 228.0,
+                w: 80.0,
+                h: 30.0,
+            },
+            "保存",
+            Action::SaveOpacity,
+            false,
+            false,
+            true,
+        );
+        self.label(
+            266.0,
+            format!("输入 {OPACITY_MIN}–{OPACITY_MAX} 之间的数值(可含小数),点保存生效"),
+            false,
+        );
         self.toggle(
-            200.0,
+            312.0,
             "单行模式",
             "压缩卡片高度，保持显示条数",
             Action::SingleLine,
             c.single_line,
         );
         self.toggle(
-            262.0,
+            374.0,
             "固定窗口位置",
             "锁定面板的移动和大小调整",
             Action::Pin,
             c.pin_position,
         );
         self.toggle(
-            324.0,
+            436.0,
             "置顶",
             "让面板保持在其他窗口上方",
             Action::Topmost,
             c.always_on_top,
         );
         self.toggle(
-            386.0,
+            498.0,
             "置底",
             "让面板保持在其他窗口下方",
             Action::Bottommost,
             c.always_on_bottom,
         );
-        self.label(456.0, "常用操作", true);
+        self.label(568.0, "常用操作", true);
         self.choices(
-            488.0,
+            600.0,
             vec![
                 ("刷新请求".into(), Action::Refresh, false),
                 ("打开请求页".into(), Action::OpenRequests, false),
             ],
             2,
         );
-        self.content_height = 536.0;
+        self.content_height = 648.0;
     }
 
     fn fields(&mut self, app: &App) {
@@ -926,7 +968,10 @@ impl Layout {
             }
             for c in self.controls.iter().filter(|c| c.body == body) {
                 // Native edit boxes paint themselves over these cells.
-                if c.action == Action::FontSearch || c.action == Action::FontSizeInput {
+                if c.action == Action::FontSearch
+                    || c.action == Action::FontSizeInput
+                    || c.action == Action::OpacityInput
+                {
                     continue;
                 }
                 let r = self.screen_rect(c, state.scroll);

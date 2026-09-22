@@ -13,7 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
 
 use crate::app::{LoginTarget, View};
-use crate::config::{FONT_SIZE_MAX, FONT_SIZE_MIN, WindowState};
+use crate::config::{FONT_SIZE_MAX, FONT_SIZE_MIN, OPACITY_MAX, OPACITY_MIN, WindowState};
 use crate::theme::Fonts;
 use crate::ui::font_search::{self, SearchBox};
 use crate::ui::layout::Rect;
@@ -32,6 +32,8 @@ pub struct Popup {
     search: Option<SearchBox>,
     /// Body font size in px, typed into a native edit box on the display tab.
     size: Option<SearchBox>,
+    /// Panel opacity in percent, typed into a native edit box on the display tab.
+    opacity: Option<SearchBox>,
 }
 
 /// Restore the panel after editing an account, including a previously open form.
@@ -126,6 +128,7 @@ pub fn open(owner: HWND, point: POINT) {
             anchor: point,
             search: None,
             size: None,
+            opacity: None,
         })
     });
     crate::apply_window_chrome(hwnd);
@@ -173,23 +176,35 @@ fn sync_edit_boxes(hwnd: HWND) {
         Some((
             p.ui.font_query.clone(),
             format!("{}", s.app.config.font_size),
+            format!("{}", s.app.config.opacity),
             p.ui.scroll,
         ))
     })
     .flatten();
-    let Some((query, size_text, scroll)) = state else {
+    let Some((query, size_text, opacity_text, scroll)) = state else {
         return;
     };
     let search = layout.edit_box_rect(&Action::FontSearch, scroll);
     let size = layout.edit_box_rect(&Action::FontSizeInput, scroll);
-    sync_box(hwnd, search, &query, false, search_slot);
-    sync_box(hwnd, size, &size_text, true, size_slot);
+    let opacity = layout.edit_box_rect(&Action::OpacityInput, scroll);
+    sync_box(hwnd, search, &query, font_search::ID, search_slot);
+    sync_box(hwnd, size, &size_text, font_search::SIZE_ID, size_slot);
+    sync_box(
+        hwnd,
+        opacity,
+        &opacity_text,
+        font_search::OPACITY_ID,
+        opacity_slot,
+    );
 }
 
 fn search_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
     &mut popup.search
 }
 
+fn opacity_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
+    &mut popup.opacity
+}
 fn size_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
     &mut popup.size
 }
@@ -202,7 +217,7 @@ fn sync_box(
     hwnd: HWND,
     rect: Option<Rect>,
     text: &str,
-    numeric: bool,
+    id: usize,
     slot: fn(&mut Popup) -> &mut Option<SearchBox>,
 ) {
     let scale = PanelState::with(|s| s.settings.as_ref().map(|p| p.scale)).flatten();
@@ -223,7 +238,7 @@ fn sync_box(
         return;
     };
     if existing.is_none() {
-        let Some(field) = SearchBox::new(hwnd, scale, text, numeric) else {
+        let Some(field) = SearchBox::new(hwnd, scale, text, id) else {
             return;
         };
         PanelState::with(|s| {
@@ -272,7 +287,7 @@ fn focus_control(hwnd: HWND, select_all: bool) {
         let p = s.settings.as_ref()?;
         match p.ui.focus {
             Some(Action::FontSearch) => p.search.as_ref().map(|b| b.hwnd),
-            Some(Action::FontSizeInput) => p.size.as_ref().map(|b| b.hwnd),
+            Some(Action::OpacityInput) => p.opacity.as_ref().map(|b| b.hwnd),
             _ => None,
         }
     })
@@ -339,6 +354,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                         p.ui.focus = Some(Action::FontSearch);
                     } else if p.size.as_ref().is_some_and(|b| b.hwnd == focused) {
                         p.ui.focus = Some(Action::FontSizeInput);
+                    } else if p.opacity.as_ref().is_some_and(|b| b.hwnd == focused) {
+                        p.ui.focus = Some(Action::OpacityInput);
                     }
                 }
             });
@@ -347,7 +364,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_CTLCOLOREDIT => {
             if let Some(color) = PanelState::with(|s| {
                 let p = s.settings.as_ref()?;
-                [p.search.as_ref(), p.size.as_ref()]
+                [p.search.as_ref(), p.size.as_ref(), p.opacity.as_ref()]
                     .into_iter()
                     .flatten()
                     .find(|b| b.hwnd.0 as isize == lp.0)
@@ -618,6 +635,8 @@ fn key(hwnd: HWND, key: u16) {
         } else if focused == Some(Action::FontSizeInput) && key == VK_RETURN.0 {
             // Enter inside the box does what the 保存 button does.
             dispatch(hwnd, Action::SaveFontSize);
+        } else if focused == Some(Action::OpacityInput) && key == VK_RETURN.0 {
+            dispatch(hwnd, Action::SaveOpacity);
         } else if let Some(action) = focused {
             dispatch(hwnd, action);
         }
@@ -703,6 +722,28 @@ fn dispatch(hwnd: HWND, action: Action) {
                 font_search::set_text(child, &format!("{applied}"));
                 if typed.is_some() {
                     actions.push(PanelAction::SetFontSize(applied));
+                }
+            }
+        }
+        Action::OpacityInput => focus_control(hwnd, true),
+        Action::SaveOpacity => {
+            let field = PanelState::with(|s| {
+                let p = s.settings.as_ref()?;
+                Some((p.opacity.as_ref().map(|b| b.hwnd), s.app.config.opacity))
+            })
+            .flatten();
+            if let Some((Some(child), current)) = field {
+                // A stray paste or an empty box reverts to the opacity in
+                // force; a parsed number is clamped like every other path so
+                // the window stays inside what `config` expects.
+                let typed = font_search::query(child).trim().parse::<f32>().ok();
+                let applied = typed
+                    .filter(|v| v.is_finite())
+                    .map(|v| v.round().clamp(OPACITY_MIN as f32, OPACITY_MAX as f32) as u8)
+                    .unwrap_or(current);
+                font_search::set_text(child, &format!("{applied}"));
+                if typed.is_some() {
+                    actions.push(PanelAction::SetOpacity(applied));
                 }
             }
         }

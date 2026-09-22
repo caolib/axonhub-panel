@@ -19,6 +19,9 @@ pub const ID: usize = 2100;
 /// The font-size box. A control id of its own keeps its notifications from
 /// being read as search input.
 pub const SIZE_ID: usize = 2101;
+/// The opacity box. A control id of its own keeps its notifications from
+/// being read as search input.
+pub const OPACITY_ID: usize = 2102;
 pub const WM_SEARCH_FOCUS: u32 = WM_APP + 42;
 const EM_LIMITTEXT: u32 = 0x00C5;
 const EM_SETSEL: u32 = 0x00B1;
@@ -51,10 +54,11 @@ pub fn font(scale: f32) -> HFONT {
 }
 
 impl SearchBox {
-    /// `numeric` restricts typed characters to digits and a decimal point;
-    /// text set programmatically (or pasted) is taken as-is.
-    pub fn new(parent: HWND, scale: f32, text: &str, numeric: bool) -> Option<Self> {
-        let id = if numeric { SIZE_ID } else { ID };
+    /// `id` selects the control: `ID` is free text, `SIZE_ID`/`OPACITY_ID`
+    /// restrict typed characters to digits and a decimal point. Text set
+    /// programmatically (or pasted) is taken as-is.
+    pub fn new(parent: HWND, scale: f32, text: &str, id: usize) -> Option<Self> {
+        let numeric = id != ID;
         let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let hwnd = unsafe {
             CreateWindowExW(
@@ -176,7 +180,7 @@ unsafe extern "system" fn edit_proc(
             }
         }
         WM_CHAR if [9, 13, 27].contains(&wp.0) => return LRESULT(0),
-        WM_CHAR if id == SIZE_ID && !numeric_char(wp.0) => return LRESULT(0),
+        WM_CHAR if id != ID && !numeric_char(wp.0) => return LRESULT(0),
         WM_MOUSEWHEEL => return unsafe { SendMessageW(parent, msg, Some(wp), Some(lp)) },
         WM_NCDESTROY => unsafe {
             let _ = RemoveWindowSubclass(hwnd, Some(edit_proc), id);

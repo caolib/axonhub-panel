@@ -75,6 +75,10 @@ pub struct Config {
     /// height. Toggled from the right-click menu; the window is resized to keep
     /// the same row count, so the panel gets shorter rather than denser.
     pub single_line: bool,
+    /// Panel opacity in percent (10–100). 100 is fully opaque; the value is
+    /// applied as a Win32 layered-window alpha. Adjustable from the settings
+    /// field and clamped to `OPACITY_MIN..=OPACITY_MAX` on load.
+    pub opacity: u8,
     /// Saved logins. All of them are polled and their requests merged into one
     /// list; the secrets live in the encrypted blob under the same ids.
     pub accounts: Vec<Account>,
@@ -104,6 +108,10 @@ pub const DEFAULT_ROWS: usize = 12;
 /// place.
 pub const FONT_SIZE_MIN: f32 = 6.0;
 pub const FONT_SIZE_MAX: f32 = 50.0;
+/// Panel opacity bounds in percent at the 96-DPI baseline. 100 is fully
+/// opaque; the floor keeps the panel legible rather than vanishing.
+pub const OPACITY_MIN: u8 = 10;
+pub const OPACITY_MAX: u8 = 100;
 
 impl Default for WindowState {
     fn default() -> Self {
@@ -131,6 +139,7 @@ impl Default for Config {
             font_size: 12.5,
             font_family: String::new(),
             single_line: false,
+            opacity: 100,
             always_on_top: true,
             pin_position: false,
             always_on_bottom: false,
@@ -390,6 +399,9 @@ impl Config {
                         || !(FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&config.font_size)
                     {
                         config.font_size = 12.5;
+                    }
+                    if !(OPACITY_MIN..=OPACITY_MAX).contains(&config.opacity) {
+                        config.opacity = 100;
                     }
                     (config, ConfigLoadStatus::Ok)
                 }

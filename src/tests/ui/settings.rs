@@ -131,6 +131,48 @@ fn font_size_is_typed_into_a_field_and_saved_with_a_button() {
 }
 
 #[test]
+fn opacity_is_typed_into_a_field_and_saved_with_a_button() {
+    let app = App::new(Config::default());
+    let state = State {
+        tab: Tab::Display,
+        ..Default::default()
+    };
+    let layout = Layout::new(&app, &state, WIDTH, HEIGHT);
+    let rect = layout
+        .edit_box_rect(&Action::OpacityInput, state.scroll)
+        .expect("the display tab shows the opacity field");
+    assert!(
+        layout
+            .controls
+            .iter()
+            .any(|c| c.action == Action::OpacityInput),
+        "the field has a layout cell for painting and Tab order"
+    );
+    let save = layout
+        .controls
+        .iter()
+        .find(|c| c.action == Action::SaveOpacity)
+        .expect("the field saves through its own button");
+    assert_eq!(rect.y, save.rect.y + TOP, "the box shares the button's row");
+}
+
+#[test]
+fn opacity_field_only_lives_on_the_display_tab() {
+    let app = App::new(Config::default());
+    for tab in [Tab::Fields, Tab::Fonts, Tab::Accounts, Tab::Channels] {
+        let state = State {
+            tab,
+            ..Default::default()
+        };
+        let layout = Layout::new(&app, &state, WIDTH, HEIGHT);
+        assert!(
+            layout.edit_box_rect(&Action::OpacityInput, 0.0).is_none(),
+            "{tab:?} hides the field"
+        );
+    }
+}
+
+#[test]
 fn the_size_field_follows_the_body_scroll() {
     let app = App::new(Config::default());
     let state = State {
