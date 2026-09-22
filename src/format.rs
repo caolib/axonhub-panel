@@ -28,9 +28,10 @@ pub fn relative_time(iso: Option<&str>, now: i64) -> String {
     };
     let delta = now - then;
     if delta < 0 {
-        // Clock skew between the panel and AxonHub; show the wall clock rather
-        // than a nonsensical "in the future".
-        return local_clock(iso);
+        // Clock skew: AxonHub's clock is briefly ahead of ours, which shows
+        // up on brand-new (often still-processing) requests. Treat the instant
+        // as just now instead of jumping to a wall-clock reading.
+        return "0s".into();
     }
     let clock = local_clock(iso);
     match delta {

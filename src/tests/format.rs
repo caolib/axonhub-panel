@@ -28,8 +28,10 @@ fn switches_to_a_date_beyond_a_week() {
 
 #[test]
 fn clock_skew_does_not_produce_a_future_age() {
-    // AxonHub briefly ahead of the panel: fall back to the wall clock.
-    assert_eq!(at(-30), local_clock(Some("2026-09-12T02:20:57Z")));
+    // A brand-new request whose server timestamp is briefly ahead of our
+    // wall clock reads as just now, not as a wall-clock reading — otherwise
+    // still-processing requests flicker to `HH:MM:SS` for a few seconds.
+    assert_eq!(at(-30), "0s");
 }
 
 #[test]
