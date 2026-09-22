@@ -1,4 +1,5 @@
-//! Native font-search edit control: IME, selection and clipboard stay native.
+//! Native edit controls for the search and font-size fields: IME, selection
+//! and clipboard stay native.
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -15,6 +16,9 @@ use windows::core::{PCWSTR, w};
 use crate::theme;
 
 pub const ID: usize = 2100;
+/// The font-size box. A control id of its own keeps its notifications from
+/// being read as search input.
+pub const SIZE_ID: usize = 2101;
 pub const WM_SEARCH_FOCUS: u32 = WM_APP + 42;
 const EM_LIMITTEXT: u32 = 0x00C5;
 const EM_SETSEL: u32 = 0x00B1;
@@ -47,20 +51,23 @@ pub fn font(scale: f32) -> HFONT {
 }
 
 impl SearchBox {
-    pub fn new(parent: HWND, scale: f32, query: &str) -> Option<Self> {
-        let query: Vec<u16> = query.encode_utf16().chain(Some(0)).collect();
+    /// `numeric` restricts typed characters to digits and a decimal point;
+    /// text set programmatically (or pasted) is taken as-is.
+    pub fn new(parent: HWND, scale: f32, text: &str, numeric: bool) -> Option<Self> {
+        let id = if numeric { SIZE_ID } else { ID };
+        let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let hwnd = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 w!("EDIT"),
-                PCWSTR(query.as_ptr()),
+                PCWSTR(text.as_ptr()),
                 WS_CHILD | WS_TABSTOP | WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
                 0,
                 0,
                 1,
                 1,
                 Some(parent),
-                Some(HMENU(ID as *mut _)),
+                Some(HMENU(id as *mut _)),
                 None,
                 None,
             )
@@ -73,8 +80,13 @@ impl SearchBox {
             scale,
         };
         unsafe {
-            let _ = SetWindowSubclass(hwnd, Some(edit_proc), ID, parent.0 as usize);
-            SendMessageW(hwnd, EM_LIMITTEXT, Some(WPARAM(128)), None);
+            let _ = SetWindowSubclass(hwnd, Some(edit_proc), id, parent.0 as usize);
+            SendMessageW(
+                hwnd,
+                EM_LIMITTEXT,
+                Some(WPARAM(if numeric { 6 } else { 128 })),
+                None,
+            );
             SendMessageW(
                 hwnd,
                 WM_SETFONT,
@@ -110,6 +122,13 @@ pub fn query(hwnd: HWND) -> String {
     String::from_utf16_lossy(&text[..count])
 }
 
+pub fn set_text(hwnd: HWND, text: &str) {
+    let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let _ = SetWindowTextW(hwnd, PCWSTR(text.as_ptr()));
+    }
+}
+
 pub fn focus(hwnd: HWND, select_all: bool) {
     unsafe {
         let _ = SetFocus(Some(hwnd));
@@ -117,6 +136,12 @@ pub fn focus(hwnd: HWND, select_all: bool) {
             SendMessageW(hwnd, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
         }
     }
+}
+
+/// Digits and one decimal point pass; control characters (backspace, delete,
+/// arrows) pass too so the edit control keeps its normal editing keys.
+fn numeric_char(ch: usize) -> bool {
+    ch < 0x20 || (0x30..=0x39).contains(&ch) || ch == 0x2E
 }
 
 unsafe extern "system" fn edit_proc(
@@ -151,6 +176,7 @@ unsafe extern "system" fn edit_proc(
             }
         }
         WM_CHAR if [9, 13, 27].contains(&wp.0) => return LRESULT(0),
+        WM_CHAR if id == SIZE_ID && !numeric_char(wp.0) => return LRESULT(0),
         WM_MOUSEWHEEL => return unsafe { SendMessageW(parent, msg, Some(wp), Some(lp)) },
         WM_NCDESTROY => unsafe {
             let _ = RemoveWindowSubclass(hwnd, Some(edit_proc), id);

@@ -13,9 +13,10 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
 
 use crate::app::{LoginTarget, View};
-use crate::config::WindowState;
+use crate::config::{FONT_SIZE_MAX, FONT_SIZE_MIN, WindowState};
 use crate::theme::Fonts;
 use crate::ui::font_search::{self, SearchBox};
+use crate::ui::layout::Rect;
 use crate::ui::login::LoginForm;
 use crate::ui::settings::{self, Action, Layout};
 use crate::worker::Command;
@@ -29,6 +30,8 @@ pub struct Popup {
     ui: settings::State,
     anchor: POINT,
     search: Option<SearchBox>,
+    /// Body font size in px, typed into a native edit box on the display tab.
+    size: Option<SearchBox>,
 }
 
 /// Restore the panel after editing an account, including a previously open form.
@@ -122,9 +125,13 @@ pub fn open(owner: HWND, point: POINT) {
             ui,
             anchor: point,
             search: None,
+            size: None,
         })
     });
     crate::apply_window_chrome(hwnd);
+    // The window's own WM_SIZE fires before `settings` is in place, so the
+    // edit boxes would otherwise not appear until the first resize.
+    sync_edit_boxes(hwnd);
     focus(hwnd);
 }
 
@@ -157,24 +164,54 @@ pub fn reload_fonts() {
     redraw();
 }
 
-fn sync_search_box(hwnd: HWND) {
+fn sync_edit_boxes(hwnd: HWND) {
     let Some(layout) = layout(hwnd) else {
         return;
     };
     let state = PanelState::with(|s| {
-        s.settings.as_ref().map(|p| {
-            (
-                p.search.as_ref().map(|search| search.hwnd),
-                p.scale,
-                p.ui.font_query.clone(),
-            )
-        })
+        let p = s.settings.as_ref()?;
+        Some((
+            p.ui.font_query.clone(),
+            format!("{}", s.app.config.font_size),
+            p.ui.scroll,
+        ))
     })
     .flatten();
-    let Some((existing, scale, query)) = state else {
+    let Some((query, size_text, scroll)) = state else {
         return;
     };
-    let Some(rect) = layout.search_rect() else {
+    let search = layout.edit_box_rect(&Action::FontSearch, scroll);
+    let size = layout.edit_box_rect(&Action::FontSizeInput, scroll);
+    sync_box(hwnd, search, &query, false, search_slot);
+    sync_box(hwnd, size, &size_text, true, size_slot);
+}
+
+fn search_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
+    &mut popup.search
+}
+
+fn size_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
+    &mut popup.size
+}
+
+/// Place one native edit box over its layout cell: create it on first use,
+/// keep its font in step with the monitor scale, and hide it while its tab is
+/// not showing. `text` only seeds a freshly created box, so a re-sync never
+/// stomps on live typing.
+fn sync_box(
+    hwnd: HWND,
+    rect: Option<Rect>,
+    text: &str,
+    numeric: bool,
+    slot: fn(&mut Popup) -> &mut Option<SearchBox>,
+) {
+    let scale = PanelState::with(|s| s.settings.as_ref().map(|p| p.scale)).flatten();
+    let Some(scale) = scale else {
+        return;
+    };
+    let existing =
+        PanelState::with(|s| slot(s.settings.as_mut()?).as_ref().map(|b| b.hwnd)).flatten();
+    let Some(rect) = rect else {
         if let Some(child) = existing {
             unsafe {
                 if GetFocus() == child {
@@ -186,27 +223,24 @@ fn sync_search_box(hwnd: HWND) {
         return;
     };
     if existing.is_none() {
-        let Some(search) = SearchBox::new(hwnd, scale, &query) else {
+        let Some(field) = SearchBox::new(hwnd, scale, text, numeric) else {
             return;
         };
         PanelState::with(|s| {
             if let Some(p) = s.settings.as_mut() {
-                p.search = Some(search);
+                *slot(p) = Some(field);
             }
         });
     }
     let ready = PanelState::with(|s| {
-        let search = s.settings.as_mut()?.search.as_mut()?;
-        let old = if (search.scale - scale).abs() > 0.01 {
-            search.scale = scale;
-            Some(std::mem::replace(
-                &mut search.font,
-                font_search::font(scale),
-            ))
+        let field = slot(s.settings.as_mut()?).as_mut()?;
+        let old = if (field.scale - scale).abs() > 0.01 {
+            field.scale = scale;
+            Some(std::mem::replace(&mut field.font, font_search::font(scale)))
         } else {
             None
         };
-        Some((search.hwnd, search.font, old))
+        Some((field.hwnd, field.font, old))
     })
     .flatten();
     if let Some((child, font, old)) = ready {
@@ -234,14 +268,16 @@ fn sync_search_box(hwnd: HWND) {
 }
 
 fn focus_control(hwnd: HWND, select_all: bool) {
-    let search = PanelState::with(|s| {
+    let child = PanelState::with(|s| {
         let p = s.settings.as_ref()?;
-        (p.ui.focus == Some(Action::FontSearch))
-            .then(|| p.search.as_ref().map(|s| s.hwnd))
-            .flatten()
+        match p.ui.focus {
+            Some(Action::FontSearch) => p.search.as_ref().map(|b| b.hwnd),
+            Some(Action::FontSizeInput) => p.size.as_ref().map(|b| b.hwnd),
+            _ => None,
+        }
     })
     .flatten();
-    font_search::focus(search.unwrap_or(hwnd), select_all && search.is_some());
+    font_search::focus(child.unwrap_or(hwnd), select_all && child.is_some());
 }
 
 fn layout(hwnd: HWND) -> Option<Layout> {
@@ -298,21 +334,24 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         font_search::WM_SEARCH_FOCUS => {
             let focused = unsafe { GetFocus() };
             PanelState::with(|s| {
-                if let Some(p) = s.settings.as_mut()
-                    && p.ui.tab == settings::Tab::Fonts
-                    && p.search
-                        .as_ref()
-                        .is_some_and(|search| search.hwnd == focused)
-                {
-                    p.ui.focus = Some(Action::FontSearch);
+                if let Some(p) = s.settings.as_mut() {
+                    if p.search.as_ref().is_some_and(|b| b.hwnd == focused) {
+                        p.ui.focus = Some(Action::FontSearch);
+                    } else if p.size.as_ref().is_some_and(|b| b.hwnd == focused) {
+                        p.ui.focus = Some(Action::FontSizeInput);
+                    }
                 }
             });
             invalidate(hwnd);
         }
         WM_CTLCOLOREDIT => {
             if let Some(color) = PanelState::with(|s| {
-                let search = s.settings.as_ref()?.search.as_ref()?;
-                (search.hwnd.0 as isize == lp.0).then(|| search.color_dc(HDC(wp.0 as *mut _)))
+                let p = s.settings.as_ref()?;
+                [p.search.as_ref(), p.size.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .find(|b| b.hwnd.0 as isize == lp.0)
+                    .map(|b| b.color_dc(HDC(wp.0 as *mut _)))
             })
             .flatten()
             {
@@ -425,8 +464,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_DPICHANGED | WM_MOVE | WM_DISPLAYCHANGE => sync_scale(hwnd),
         WM_SIZE => {
+            // `scroll` re-places the edit boxes for the new geometry.
             scroll(hwnd, 0.0);
-            sync_search_box(hwnd);
             invalidate(hwnd);
         }
         WM_CLOSE => unsafe {
@@ -491,7 +530,7 @@ fn sync_scale(hwnd: HWND) {
             );
         }
     }
-    sync_search_box(hwnd);
+    sync_edit_boxes(hwnd);
     invalidate(hwnd);
 }
 
@@ -506,6 +545,9 @@ fn scroll(hwnd: HWND, delta: f32) {
             p.ui.pressed = None;
         }
     });
+    // Edit boxes are placed rather than painted, so they must follow the
+    // offset themselves.
+    sync_edit_boxes(hwnd);
     invalidate(hwnd);
 }
 
@@ -573,6 +615,9 @@ fn key(hwnd: HWND, key: u16) {
             if let Some(name) = first {
                 dispatch(hwnd, Action::FontFamily(name));
             }
+        } else if focused == Some(Action::FontSizeInput) && key == VK_RETURN.0 {
+            // Enter inside the box does what the 保存 button does.
+            dispatch(hwnd, Action::SaveFontSize);
         } else if let Some(action) = focused {
             dispatch(hwnd, action);
         }
@@ -623,7 +668,7 @@ fn dispatch(hwnd: HWND, action: Action) {
                     });
                 }
             });
-            sync_search_box(hwnd);
+            sync_edit_boxes(hwnd);
             focus_control(hwnd, false);
         }
         Action::Rows(rows) => actions.push(PanelAction::ResizeToRows(rows)),
@@ -639,7 +684,28 @@ fn dispatch(hwnd: HWND, action: Action) {
                 s.app.save();
             });
         }
-        Action::Font(size) => actions.push(PanelAction::SetFontSize(size)),
+        Action::FontSizeInput => focus_control(hwnd, true),
+        Action::SaveFontSize => {
+            let field = PanelState::with(|s| {
+                let p = s.settings.as_ref()?;
+                Some((p.size.as_ref().map(|b| b.hwnd), s.app.config.font_size))
+            })
+            .flatten();
+            if let Some((Some(child), current)) = field {
+                // A stray paste or an empty box reverts to the size in force;
+                // a parsed number is clamped like every other path so the
+                // layout stays inside what `config` and `sync_scale` expect.
+                let typed = font_search::query(child).trim().parse::<f32>().ok();
+                let applied = typed
+                    .filter(|size| size.is_finite())
+                    .map(|size| size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX))
+                    .unwrap_or(current);
+                font_search::set_text(child, &format!("{applied}"));
+                if typed.is_some() {
+                    actions.push(PanelAction::SetFontSize(applied));
+                }
+            }
+        }
         Action::FontFamily(name) => actions.push(PanelAction::SetFontFamily(name)),
         Action::FontSearch => focus_control(hwnd, false),
         Action::SingleLine => crate::on_command(WPARAM(crate::MENU_SINGLE_LINE), &mut actions),
@@ -662,7 +728,9 @@ fn dispatch(hwnd: HWND, action: Action) {
         Action::TestAccount(id) => {
             PanelState::with(|s| {
                 s.app.begin_probe(&id);
-                s.worker.send(Command::TestAccount { account: id.clone() });
+                s.worker.send(Command::TestAccount {
+                    account: id.clone(),
+                });
             });
         }
         Action::RemoveAccount(_) | Action::ClearCredentials => {

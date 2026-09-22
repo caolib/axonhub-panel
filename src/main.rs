@@ -5,8 +5,8 @@
 mod app;
 mod client;
 mod config;
-mod format;
 mod font_catalog;
+mod format;
 mod model;
 mod popup;
 mod settings_window;
@@ -20,9 +20,7 @@ use std::cell::RefCell;
 
 use ui::clipboard::{clipboard_text, set_clipboard_text};
 
-use windows::Win32::Foundation::{
-    COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
-};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, CreateSolidBrush,
     DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetDeviceCaps, GetMonitorInfoW, HDC,
@@ -50,7 +48,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 use app::{App, LoginTarget, View};
-use config::{Account, Config, CredentialMode, Credentials, Stored, WindowState};
+use config::{
+    Account, Config, CredentialMode, Credentials, FONT_SIZE_MAX, FONT_SIZE_MIN, Stored, WindowState,
+};
 use theme::{Fonts, Painter};
 use time::now_unix;
 use ui::detail::{self, Button};
@@ -211,7 +211,9 @@ const MENU_ROWS_20: usize = 1403;
 const MENU_QUIT: usize = 1300;
 /// Toggle the one-line card layout.
 const MENU_SINGLE_LINE: usize = 1204;
-/// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` = 24 px.
+/// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` =
+/// 24 px. The menu lists common integer steps; the settings field accepts
+/// anything in `config::FONT_SIZE_MIN..=FONT_SIZE_MAX`.
 const MENU_FONT_BASE: usize = 1500;
 const MENU_FONT_MAX: usize = MENU_FONT_BASE + 14;
 /// Accounts listed under the "打开请求页" submenu: index into `config.accounts`.
@@ -474,7 +476,11 @@ fn init_logging() {
     let make_writer = {
         let path = path.clone();
         move || -> Box<dyn std::io::Write + Send> {
-            match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 Ok(file) => Box::new(file),
                 Err(_) => Box::new(std::io::sink()),
             }
@@ -1043,7 +1049,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     Some(edge) => edge.cursor_id(),
                     // The hand signals "this is clickable"; pinned mode is not,
                     // so show an arrow even where `hit_test` reports `HTCLIENT`.
-                    None if !pinned && hit_test(m, local_x, local_y) == HTCLIENT as isize => IDC_HAND,
+                    None if !pinned && hit_test(m, local_x, local_y) == HTCLIENT as isize => {
+                        IDC_HAND
+                    }
                     None => IDC_ARROW,
                 }
             };
@@ -1423,15 +1431,18 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                     s.fonts = Fonts::load(s.scale, &s.app.config.font_family);
                     s.app.save();
                     s.detail.as_ref().map(|p| p.hwnd)
-                }).flatten();
+                })
+                .flatten();
                 settings_window::reload_fonts();
                 invalidate(hwnd);
-                if let Some(detail) = detail { invalidate(detail); }
+                if let Some(detail) = detail {
+                    invalidate(detail);
+                }
             }
             Action::SetFontSize(size) => {
-                // Clamp here too, so a value that slipped past the menu (e.g. a
+                // Clamp here too, so a value that slipped past the field (or a
                 // stale config from a future range) cannot blow the layout up.
-                let size = size.clamp(10.0, 24.0);
+                let size = size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
                 State::with(|s| s.app.config.font_size = size);
                 // Re-derive the draw scale from the new font size, reload the
                 // fonts and refit the window — `sync_scale` is the same path a
@@ -1497,25 +1508,17 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 invalidate(hwnd);
             }
             Action::CopySelection => {
-                let text = State::with(|s| {
-                    s.app
-                        .login
-                        .as_ref()
-                        .and_then(|form| form.selected_text())
-                })
-                .flatten();
+                let text =
+                    State::with(|s| s.app.login.as_ref().and_then(|form| form.selected_text()))
+                        .flatten();
                 if let Some(text) = text {
                     set_clipboard_text(&text);
                 }
             }
             Action::CutSelection => {
-                let cut = State::with(|s| {
-                    s.app
-                        .login
-                        .as_mut()
-                        .and_then(|form| form.take_selection())
-                })
-                .flatten();
+                let cut =
+                    State::with(|s| s.app.login.as_mut().and_then(|form| form.take_selection()))
+                        .flatten();
                 match cut {
                     Some(text) => set_clipboard_text(&text),
                     // Nothing selected: Ctrl+X keeps its old meaning of
@@ -1547,7 +1550,8 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                     // Deleting the last account leaves nothing to poll, so the
                     // form comes back up for a new one.
                     if s.app.accounts.is_empty() {
-                        s.app.open_login(Some("已删除账号,请添加一个".into()), LoginTarget::Add);
+                        s.app
+                            .open_login(Some("已删除账号,请添加一个".into()), LoginTarget::Add);
                     } else {
                         s.app.status = Some(("已删除账号".into(), false));
                     }
@@ -1591,7 +1595,8 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                         Some(account) => LoginTarget::Account(account.id.clone()),
                         None => LoginTarget::Add,
                     };
-                    s.app.open_login(Some("已清除本机保存的凭据".into()), target);
+                    s.app
+                        .open_login(Some("已清除本机保存的凭据".into()), target);
                 });
                 sync_activation(&mut actions);
                 invalidate(hwnd);
@@ -1942,9 +1947,7 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
     // A GDI+ session to measure text with, so the caret can be placed at the
     // character under the pointer. One DC and one graphics object per click.
     let hdc = unsafe { GetDC(Some(hwnd)) };
-    let painter = (!hdc.is_invalid())
-        .then(|| Painter::new(hdc))
-        .flatten();
+    let painter = (!hdc.is_invalid()).then(|| Painter::new(hdc)).flatten();
 
     State::with(|s| {
         if s.app.is_login() {
@@ -2270,10 +2273,7 @@ fn submit_login(hwnd: HWND) {
                 // The account has to exist in the poll list before the answer
                 // lands, or the issued token would have nowhere to go.
                 send_targets(s);
-                s.worker.send(Command::SignIn {
-                    account: id,
-                    creds,
-                });
+                s.worker.send(Command::SignIn { account: id, creds });
             });
         }
         Submission::Token(token) => {
@@ -2752,10 +2752,7 @@ fn open_detail(panel: HWND, index: usize, point: POINT) {
                 });
                 // The request has to be fetched from the account that listed
                 // it: another account on another server cannot see it.
-                s.worker.send(Command::FetchDetail {
-                    account,
-                    id,
-                });
+                s.worker.send(Command::FetchDetail { account, id });
             });
             if existing.is_some() {
                 place_detail_at(hwnd, point);
@@ -2772,11 +2769,20 @@ fn open_detail(panel: HWND, index: usize, point: POINT) {
 
 fn place_detail_at(hwnd: HWND, point: POINT) {
     let mut rc = RECT::default();
-    unsafe { let _ = GetWindowRect(hwnd, &mut rc); }
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut rc);
+    }
     let placed = popup::at_point(point, rc.right - rc.left, rc.bottom - rc.top);
     unsafe {
-        let _ = SetWindowPos(hwnd, None, placed.x, placed.y, placed.width, placed.height,
-            SWP_NOZORDER | SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            placed.x,
+            placed.y,
+            placed.width,
+            placed.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
 }
 

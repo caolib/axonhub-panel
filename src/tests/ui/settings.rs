@@ -100,3 +100,71 @@ fn hidden_cells_show_unchecked_and_there_is_a_reset() {
         "the tab offers a reset"
     );
 }
+
+#[test]
+fn font_size_is_typed_into_a_field_and_saved_with_a_button() {
+    let app = App::new(Config::default());
+    let state = State {
+        tab: Tab::Display,
+        ..Default::default()
+    };
+    let layout = Layout::new(&app, &state, WIDTH, HEIGHT);
+    let rect = layout
+        .edit_box_rect(&Action::FontSizeInput, state.scroll)
+        .expect("the display tab shows the size field");
+    assert!(
+        layout
+            .controls
+            .iter()
+            .any(|c| c.action == Action::FontSizeInput),
+        "the field has a layout cell for painting and Tab order"
+    );
+    let save = layout
+        .controls
+        .iter()
+        .find(|c| c.action == Action::SaveFontSize)
+        .expect("the field saves through its own button");
+    // The button is painted from content coordinates; the native box is placed
+    // from screen coordinates, so it must carry the same content-top offset —
+    // placing it at its raw content y lands it at the top of the window.
+    assert_eq!(rect.y, save.rect.y + TOP, "the box shares the button's row");
+}
+
+#[test]
+fn the_size_field_follows_the_body_scroll() {
+    let app = App::new(Config::default());
+    let state = State {
+        tab: Tab::Display,
+        ..Default::default()
+    };
+    let layout = Layout::new(&app, &state, WIDTH, MIN_HEIGHT);
+    let rest = layout
+        .edit_box_rect(&Action::FontSizeInput, 0.0)
+        .expect("visible at the top of the body");
+    let scrolled = layout
+        .edit_box_rect(&Action::FontSizeInput, 60.0)
+        .expect("still visible after a short scroll");
+    assert_eq!(rest.y - scrolled.y, 60.0, "the box moves with the content");
+    assert!(
+        layout
+            .edit_box_rect(&Action::FontSizeInput, 10_000.0)
+            .is_none(),
+        "hidden once the body scrolls past the field"
+    );
+}
+
+#[test]
+fn font_size_field_only_lives_on_the_display_tab() {
+    let app = App::new(Config::default());
+    for tab in [Tab::Fields, Tab::Fonts, Tab::Accounts, Tab::Channels] {
+        let state = State {
+            tab,
+            ..Default::default()
+        };
+        let layout = Layout::new(&app, &state, WIDTH, HEIGHT);
+        assert!(
+            layout.edit_box_rect(&Action::FontSizeInput, 0.0).is_none(),
+            "{tab:?} hides the field"
+        );
+    }
+}

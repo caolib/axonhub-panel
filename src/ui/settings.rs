@@ -1,7 +1,7 @@
 //! Settings content and geometry, shared by painting, pointer and keyboard input.
 
 use crate::app::{App, ProbeState};
-use crate::config::{CredentialMode, DisplayField, HiddenChannel};
+use crate::config::{CredentialMode, DisplayField, FONT_SIZE_MAX, FONT_SIZE_MIN, HiddenChannel};
 use crate::font_catalog::InstalledFont;
 use crate::theme::{self, Fonts, Painter};
 use crate::ui::layout::Rect;
@@ -29,7 +29,10 @@ pub enum Action {
     Rows(usize),
     Field(DisplayField),
     ShowAllFields,
-    Font(f32),
+    /// The font-size cell, covered by a native edit box that types the number.
+    FontSizeInput,
+    /// Apply what the font-size box holds; unparsable input reverts.
+    SaveFontSize,
     FontFamily(String),
     FontSearch,
     SingleLine,
@@ -134,10 +137,7 @@ impl Layout {
             (Tab::Display, "显示与窗口".to_string()),
             (Tab::Fields, "属性显示".to_string()),
             (Tab::Fonts, "字体".to_string()),
-            (
-                Tab::Accounts,
-                format!("账号 · {}", app.accounts.len()),
-            ),
+            (Tab::Accounts, format!("账号 · {}", app.accounts.len())),
             (Tab::Channels, "渠道过滤".to_string()),
         ]
         .into_iter()
@@ -278,7 +278,13 @@ impl Layout {
         self.label_colored(y, text, heading, None);
     }
 
-    fn label_colored(&mut self, y: f32, text: impl Into<String>, heading: bool, color: Option<u32>) {
+    fn label_colored(
+        &mut self,
+        y: f32,
+        text: impl Into<String>,
+        heading: bool,
+        color: Option<u32>,
+    ) {
         self.labels.push(Label {
             rect: Rect {
                 x: 24.0,
@@ -345,19 +351,40 @@ impl Layout {
             4,
         );
         self.label(80.0, format!("字号 · 当前 {} px", c.font_size), true);
-        let mut sizes = vec![(
-            "12.5".into(),
-            Action::Font(12.5),
-            (c.font_size - 12.5).abs() < 0.01,
-        )];
-        sizes.extend((10..=24).map(|n| {
-            (
-                n.to_string(),
-                Action::Font(n as f32),
-                (c.font_size - n as f32).abs() < 0.01,
-            )
-        }));
-        self.choices(112.0, sizes, 8);
+        // This cell is a native edit box (see `font_size_rect`); the control
+        // below only carries its geometry so painting and Tab order agree.
+        self.controls.push(Control {
+            rect: Rect {
+                x: 24.0,
+                y: 112.0,
+                w: 120.0,
+                h: 30.0,
+            },
+            label: String::new(),
+            action: Action::FontSizeInput,
+            selected: false,
+            danger: false,
+            body: true,
+            check: false,
+        });
+        self.button(
+            Rect {
+                x: 152.0,
+                y: 112.0,
+                w: 80.0,
+                h: 30.0,
+            },
+            "保存",
+            Action::SaveFontSize,
+            false,
+            false,
+            true,
+        );
+        self.label(
+            150.0,
+            format!("输入 {FONT_SIZE_MIN}–{FONT_SIZE_MAX} 之间的数值(可含小数),点保存生效"),
+            false,
+        );
         self.toggle(
             200.0,
             "单行模式",
@@ -459,14 +486,12 @@ impl Layout {
             let probe = app.probe.as_ref().filter(|p| p.id == account.id);
             let (status, status_color) = match probe.map(|p| &p.state) {
                 Some(ProbeState::Running) => ("正在测试连接…".to_string(), None),
-                Some(ProbeState::Ok(total)) => (
-                    format!("连接正常 · 共 {total} 条请求"),
-                    Some(theme::GREEN),
-                ),
-                Some(ProbeState::Failed(message)) => (
-                    format!("测试失败 · {message}"),
-                    Some(theme::RED),
-                ),
+                Some(ProbeState::Ok(total)) => {
+                    (format!("连接正常 · 共 {total} 条请求"), Some(theme::GREEN))
+                }
+                Some(ProbeState::Failed(message)) => {
+                    (format!("测试失败 · {message}"), Some(theme::RED))
+                }
                 None => (
                     app.account_state(&account.id)
                         .unwrap_or_else(|| {
@@ -628,11 +653,16 @@ impl Layout {
         self.content_height = y + 12.0;
     }
 
-    pub fn search_rect(&self) -> Option<Rect> {
-        self.controls
-            .iter()
-            .find(|c| c.action == Action::FontSearch)
-            .map(|c| c.rect)
+    /// Screen-space cell of a native edit box, given the body scroll offset.
+    /// A body cell follows the content top and the scroll, and stays hidden
+    /// while it is not fully inside the viewport — a child window cannot be
+    /// clipped to the body the way painting is.
+    pub fn edit_box_rect(&self, action: &Action, scroll: f32) -> Option<Rect> {
+        let control = self.controls.iter().find(|c| c.action == *action)?;
+        let rect = self.screen_rect(control, scroll);
+        let visible = !control.body
+            || (rect.y >= self.content_top && rect.y + rect.h <= self.height - FOOTER);
+        visible.then_some(rect)
     }
 
     fn channels(&mut self, app: &App) {
@@ -895,7 +925,8 @@ impl Layout {
                 p.reset_clip();
             }
             for c in self.controls.iter().filter(|c| c.body == body) {
-                if c.action == Action::FontSearch {
+                // Native edit boxes paint themselves over these cells.
+                if c.action == Action::FontSearch || c.action == Action::FontSizeInput {
                     continue;
                 }
                 let r = self.screen_rect(c, state.scroll);

@@ -66,8 +66,8 @@ pub struct Config {
     /// Body font size in pixels at the 96-DPI baseline (the authored value is
     /// 12.5). The whole panel — fonts, cards and the window itself — scales in
     /// proportion with it, so this is the single knob for how large the text
-    /// reads. Adjustable from the right-click menu (10–24) and clamped to that
-    /// range on load.
+    /// reads. Adjustable from the settings field and the right-click menu, and
+    /// clamped to `FONT_SIZE_MIN..=FONT_SIZE_MAX` on load.
     pub font_size: f32,
     /// Installed font family; empty uses the built-in fallback chain.
     pub font_family: String,
@@ -98,6 +98,12 @@ pub struct WindowState {
 /// Rows the panel shows by default. Twelve cards plus chrome is about 567px,
 /// which fits a 1080p work area with room to spare.
 pub const DEFAULT_ROWS: usize = 12;
+
+/// Body font size bounds in px at the 96-DPI baseline. The settings field, the
+/// menu and the load-time clamp all share these, so the range moves in one
+/// place.
+pub const FONT_SIZE_MIN: f32 = 6.0;
+pub const FONT_SIZE_MAX: f32 = 50.0;
 
 impl Default for WindowState {
     fn default() -> Self {
@@ -377,10 +383,12 @@ impl Config {
             Ok(raw) => match serde_json::from_str::<Config>(&raw) {
                 Ok(mut config) => {
                     // A hand-edited file may hold NaN, infinity or a value
-                    // outside the 10–24 range the menu offers; fall back to the
-                    // authored 12.5 so a bad number can never shrink the panel
-                    // to nothing or blow it up. Kept exactly as before.
-                    if !config.font_size.is_finite() || !(10.0..=24.0).contains(&config.font_size) {
+                    // outside the supported range; fall back to the authored
+                    // 12.5 so a bad number can never shrink the panel to
+                    // nothing or blow it up.
+                    if !config.font_size.is_finite()
+                        || !(FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&config.font_size)
+                    {
                         config.font_size = 12.5;
                     }
                     (config, ConfigLoadStatus::Ok)
