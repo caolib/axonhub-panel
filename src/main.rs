@@ -214,6 +214,9 @@ const MENU_SINGLE_LINE: usize = 1204;
 /// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` = 24 px.
 const MENU_FONT_BASE: usize = 1500;
 const MENU_FONT_MAX: usize = MENU_FONT_BASE + 14;
+/// Accounts listed under the "打开请求页" submenu: index into `config.accounts`.
+const MENU_OPEN_ACCOUNT_BASE: usize = 1600;
+const MENU_OPEN_ACCOUNT_MAX: usize = MENU_OPEN_ACCOUNT_BASE + 99;
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -2363,10 +2366,17 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
             actions.push(Action::SetSingleLine(on));
         }
         MENU_OPEN => {
-            let url = format!(
-                "{}/project/requests",
-                s.app.config.endpoint.trim_end_matches('/')
-            );
+            // Reached with no or one account; with several the entry becomes a
+            // submenu and the account branch below handles it. An account's own
+            // endpoint wins over the panel-level one, which may be stale.
+            let endpoint = s
+                .app
+                .config
+                .accounts
+                .first()
+                .map(|a| a.endpoint.clone())
+                .unwrap_or_else(|| s.app.config.endpoint.clone());
+            let url = format!("{}/project/requests", endpoint.trim_end_matches('/'));
             actions.push(Action::OpenUrl(url));
         }
         MENU_SETTINGS => actions.push(Action::ShowSettings(popup::cursor())),
@@ -2377,6 +2387,15 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
         MENU_ROWS_20 => actions.push(Action::ResizeToRows(20)),
         _ if (MENU_FONT_BASE..=MENU_FONT_MAX).contains(&id) => {
             actions.push(Action::SetFontSize((10 + (id - MENU_FONT_BASE)) as f32));
+        }
+        _ if (MENU_OPEN_ACCOUNT_BASE..=MENU_OPEN_ACCOUNT_MAX).contains(&id) => {
+            if let Some(account) = s.app.config.accounts.get(id - MENU_OPEN_ACCOUNT_BASE) {
+                let url = format!(
+                    "{}/project/requests",
+                    account.endpoint.trim_end_matches('/')
+                );
+                actions.push(Action::OpenUrl(url));
+            }
         }
         _ => return,
     });
@@ -2478,7 +2497,38 @@ fn show_menu(hwnd: HWND) {
         add("单行模式", MENU_SINGLE_LINE, single, true);
 
         add("刷新", MENU_REFRESH, false, true);
-        add("打开请求页", MENU_OPEN, false, true);
+        // Several accounts are several servers, so the entry turns into a
+        // submenu and the user picks which server's requests page to open.
+        let accounts = State::with(|s| s.app.config.accounts.clone()).unwrap_or_default();
+        if accounts.len() < 2 {
+            add("打开请求页", MENU_OPEN, false, true);
+        } else if let Ok(open_menu) = CreatePopupMenu() {
+            for (i, account) in accounts
+                .iter()
+                .take(MENU_OPEN_ACCOUNT_MAX - MENU_OPEN_ACCOUNT_BASE + 1)
+                .enumerate()
+            {
+                let text = if account.name.trim().is_empty() {
+                    config::endpoint_host(&account.endpoint)
+                } else {
+                    account.name.clone()
+                };
+                let mut wide = label(&text);
+                let _ = AppendMenuW(
+                    open_menu,
+                    MF_STRING,
+                    MENU_OPEN_ACCOUNT_BASE + i,
+                    PCWSTR(wide.as_mut_ptr()),
+                );
+            }
+            let mut sub_label = label("打开请求页");
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | MF_POPUP,
+                open_menu.0 as usize,
+                PCWSTR(sub_label.as_mut_ptr()),
+            );
+        }
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add("固定窗口位置", MENU_PIN_POSITION, pinned, true);
