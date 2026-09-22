@@ -1,6 +1,6 @@
 [package]
 name = "ah-panel"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Floating desktop panel showing live AxonHub requests"
 
