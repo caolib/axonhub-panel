@@ -17,6 +17,10 @@ fn view<'a>(rows: &'a [Row], pinned: bool) -> ListView<'a> {
         pinned,
         filter: model::FILTER_NONE,
         hidden_fields: &[],
+        id_query: None,
+        id_draft: "",
+        id_editing: false,
+        id_caret: false,
     }
 }
 
@@ -70,6 +74,16 @@ fn gaps_and_the_list_area_do_not_hit() {
     assert!(hit_filter(m, &v, gap_mid, first.y + 1.0).is_none());
     assert!(hit_filter(m, &v, 10.0, m.header_h + 1.0).is_none());
     assert!(hit_filter(m, &v, -1.0, 10.0).is_none());
+}
+
+#[test]
+fn id_box_sits_left_of_settings_inside_the_header() {
+    let m = Metrics::new(452.0, 300.0, 1.5);
+    let settings = settings_button(m);
+    let id = id_box_rect(m);
+    assert!(id.x + id.w <= settings.x);
+    assert!(id.y >= 0.0 && id.y + id.h <= m.header_h);
+    assert!(id.w > 0.0 && id.h > 0.0);
 }
 
 #[test]

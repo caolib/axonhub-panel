@@ -5,3 +5,5 @@
 # never be committed; config.json can leak an endpoint, so keep it out too.
 /credentials.bin
 /config.json
+
+docs/api

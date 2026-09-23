@@ -112,6 +112,9 @@ pub enum Command {
     TestAccount {
         account: String,
     },
+    /// Restrict the polled list with the console's `modelID` filter. `None`
+    /// clears it and the next poll is the unfiltered page again.
+    SetModelFilter(Option<String>),
     Shutdown,
 }
 
@@ -187,6 +190,7 @@ fn apply_command(
     pending_creds: &mut Option<(String, Credentials)>,
     pending_detail: &mut Option<(String, String)>,
     pending_probe: &mut Option<String>,
+    id_filter: &mut Option<String>,
 ) -> bool {
     match command {
         Command::Shutdown => return true,
@@ -211,6 +215,11 @@ fn apply_command(
         }
         Command::FetchDetail { account, id } => *pending_detail = Some((account, id)),
         Command::TestAccount { account } => *pending_probe = Some(account),
+        Command::SetModelFilter(id) => {
+            *id_filter = id;
+            *next_poll = Instant::now();
+            *force = true;
+        }
     }
     false
 }
@@ -230,6 +239,7 @@ fn run(
     let mut pending_creds: Option<(String, Credentials)> = None;
     let mut pending_detail: Option<(String, String)> = None;
     let mut pending_probe: Option<String> = None;
+    let mut id_filter: Option<String> = None;
     let mut next_poll = Instant::now();
     // Emit the signed-out notice once per transition rather than every idle
     // tick, which would otherwise force a pointless repaint each second.
@@ -250,6 +260,7 @@ fn run(
                 &mut pending_creds,
                 &mut pending_detail,
                 &mut pending_probe,
+                &mut id_filter,
             ) {
                 shutdown = true;
             }
@@ -348,11 +359,12 @@ fn run(
                     continue;
                 };
                 polled = true;
-                match client.fetch_requests(
+                match client.fetch_requests_where(
                     &target.graphql_url(),
                     &token,
                     &target.project_id,
                     config.row_limit,
+                    id_filter.as_deref(),
                 ) {
                     Ok((requests, total)) => {
                         cycle.total += total;
@@ -455,6 +467,7 @@ fn run(
                         &mut pending_creds,
                         &mut pending_detail,
                         &mut pending_probe,
+                        &mut id_filter,
                     ) {
                         return;
                     }

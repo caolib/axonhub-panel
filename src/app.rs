@@ -54,6 +54,16 @@ pub struct App {
     /// Selected status-filter bits applied on top of the merged list;
     /// `FILTER_NONE` shows every row.
     pub filter: FilterMask,
+    /// Model id the list is narrowed to, after the header box is submitted.
+    /// `None` is the unfiltered page.
+    pub id_query: Option<String>,
+    /// Digits currently shown in the header box, whether or not they have been
+    /// submitted.
+    pub id_draft: String,
+    /// The header box holds the keyboard.
+    pub id_editing: bool,
+    /// Caret visibility while `id_editing`; toggled by the blink timer.
+    pub id_caret: bool,
     /// Unclamped scroll offset in pixels; the UI clamps against the metrics.
     pub scroll: f32,
     pub hover: Option<usize>,
@@ -84,6 +94,10 @@ impl App {
             axon_total: 0,
             total: 0,
             filter: model::FILTER_NONE,
+            id_query: None,
+            id_draft: String::new(),
+            id_editing: false,
+            id_caret: true,
             scroll: 0.0,
             hover: None,
             selected: None,
@@ -186,10 +200,7 @@ impl App {
                     self.axon_rows = rows;
                     self.axon_total = total;
                     self.rebuild();
-                    // A broken account is worth keeping on the status line,
-                    // which a plain "everything is fine" poll would otherwise
-                    // clear a moment later.
-                    self.status = self.issue_status();
+                    self.status = self.status_line();
                 }
                 Update::Accounts { open, broken } => {
                     self.open_accounts = open;
@@ -205,7 +216,7 @@ impl App {
                         }
                     }
                     self.issues = broken;
-                    self.status = self.issue_status();
+                    self.status = self.status_line();
                 }
                 Update::Detail { .. } => {
                     // Consumed by the window layer, which owns the detail popup;
@@ -254,6 +265,18 @@ impl App {
         }
     }
 
+    /// What the status line should say after a poll: a broken account first,
+    /// otherwise a submitted id that came back with no row.
+    fn status_line(&self) -> Option<(String, bool)> {
+        if let Some(line) = self.issue_status() {
+            return Some(line);
+        }
+        self.id_query
+            .as_ref()
+            .filter(|_| self.rows.is_empty())
+            .map(|_| ("未找到该模型".into(), true))
+    }
+
     /// The status line for a broken account, if any: one line, naming the
     /// account so it is clear which login needs attention.
     fn issue_status(&self) -> Option<(String, bool)> {
@@ -267,13 +290,15 @@ impl App {
     pub fn rebuild(&mut self) {
         let mut rows = self.axon_rows.clone();
         rows.sort_by_key(|row| std::cmp::Reverse(row.age_key()));
-        if self.filter != model::FILTER_NONE {
+        // A looked-up request is shown on its own, past the status chips and
+        // the hidden-channel list: those filters are what the lookup is for.
+        if self.id_query.is_none() && self.filter != model::FILTER_NONE {
             rows.retain(|row| model::mask_matches(self.filter, row.status));
         }
         // Hidden channels drop out before the cap, so the visible count is
         // still the newest N rows.
         let hidden = &self.config.hidden_channels;
-        if !hidden.is_empty() {
+        if self.id_query.is_none() && !hidden.is_empty() {
             rows.retain(|row| {
                 !row.channel.as_deref().is_some_and(|channel| {
                     hidden

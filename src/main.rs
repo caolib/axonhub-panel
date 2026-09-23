@@ -26,7 +26,7 @@ use windows::Win32::Graphics::Gdi::{
     DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetDeviceCaps, GetMonitorInfoW, HDC,
     HGDIOBJ, HORZSIZE, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW,
     MonitorFromPoint, MonitorFromRect, MonitorFromWindow, PAINTSTRUCT, ReleaseDC, SRCCOPY,
-    SelectObject, VERTSIZE,
+    ScreenToClient, SelectObject, VERTSIZE,
 };
 use windows::Win32::Graphics::GdiPlus::{
     GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GdiplusStartupOutput,
@@ -88,6 +88,19 @@ const TIMER_POLL: usize = 1;
 const TIMER_CARET: usize = 2;
 /// Repaints so relative timestamps ("3 分钟前") stay honest while idle.
 const TIMER_CLOCK: usize = 3;
+
+/// Whether the cursor is over the header id field, in client coordinates.
+fn over_id_box(hwnd: HWND) -> bool {
+    if State::with(|s| s.app.is_login()).unwrap_or(true) {
+        return false;
+    }
+    let mut cursor = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut cursor);
+        let _ = ScreenToClient(hwnd, &mut cursor);
+    }
+    panel::id_box_rect(metrics_for(hwnd)).contains(cursor.x as f32, cursor.y as f32)
+}
 
 /// Whether Ctrl (or Shift for Ctrl+Shift+V) is held.
 fn ctrl_down() -> bool {
@@ -366,9 +379,10 @@ fn hit_test(m: Metrics, x: f32, y: f32) -> isize {
             // open anything; a card with something to explain — a request that
             // failed, or one that only succeeded after a failed attempt — is the
             // exception, since there the reason is one click away. The header
-            // filter chips are clickable too.
+            // filter chips and the id field are clickable too.
             let view = list_view(s);
             panel::settings_button(m).contains(x, y)
+                || panel::id_box_rect(m).contains(x, y)
                 || panel::hit_filter(m, &view, x, y).is_some()
                 || panel::hit_error_row(m, &view, x, y).is_some()
         }
@@ -1050,11 +1064,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             // The sign-in form's text rows are the one place where the pointer
             // means "put the caret here", so they get the I-beam.
             let over_text = State::with(|s| {
-                s.app.is_login()
+                (s.app.is_login()
                     && s.app
                         .login
                         .as_ref()
-                        .is_some_and(|f| login::hit_text_field(f, m, local_x, local_y))
+                        .is_some_and(|f| login::hit_text_field(f, m, local_x, local_y)))
+                    || (!s.app.is_login() && panel::id_box_rect(m).contains(local_x, local_y))
             })
             .unwrap_or(false);
             let pinned = State::with(|s| s.app.config.pin_position).unwrap_or(false);
@@ -1260,6 +1275,44 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             fit_window_to_work_area(hwnd);
         }
         WM_COMMAND => on_command(wp, &mut actions),
+        WM_MOUSEACTIVATE => {
+            // The id field is drawn by the panel, and a layered window with
+            // WS_EX_NOACTIVATE never receives the keys for it. Drop the style
+            // before this click is delivered so the panel can take them.
+            if over_id_box(hwnd) {
+                State::with(|s| {
+                    s.app.id_editing = true;
+                    s.app.id_caret = true;
+                    s.activatable = true;
+                });
+                apply_activation(hwnd, true);
+                unsafe {
+                    let _ = SetForegroundWindow(hwnd);
+                    let _ = SetFocus(Some(hwnd));
+                }
+                actions.push(Action::Redraw);
+                return LRESULT(MA_ACTIVATE as isize);
+            }
+            return unsafe { DefWindowProcW(hwnd, msg, wp, lp) };
+        }
+        WM_ACTIVATE if wp.0 as u32 & 0xFFFF == WA_INACTIVE => {
+            // Focus left the panel. Stop accepting keys, unless the sign-in
+            // form is up — that one stays ready for the next keystroke.
+            let keep = State::with(|s| {
+                if s.app.is_login() {
+                    return true;
+                }
+                s.app.id_editing = false;
+                s.activatable = false;
+                false
+            })
+            .unwrap_or(false);
+            if !keep {
+                apply_activation(hwnd, false);
+                actions.push(Action::Redraw);
+            }
+        }
+        WM_SIZE => actions.push(Action::Redraw),
         WM_CLOSE => actions.push(Action::Quit),
         WM_DESTROY => {
             save_window_state(hwnd);
@@ -1673,6 +1726,30 @@ fn save_window_state(hwnd: HWND) {
     });
 }
 
+/// One character typed into the header box. Long enough for a full request
+/// GUID; control characters never reach here.
+fn type_id_char(app: &mut App, ch: char) -> bool {
+    if ch.is_control() || app.id_draft.chars().count() >= 64 {
+        return false;
+    }
+    app.id_draft.push(ch);
+    app.id_caret = true;
+    true
+}
+
+/// Enter in the header box sends the text as the console's `modelID` filter.
+/// An empty box clears it.
+fn submit_id_query(hwnd: HWND) {
+    let query = State::with(|s| s.app.id_draft.trim().to_string()).filter(|q| !q.is_empty());
+    State::with(|s| {
+        s.app.id_query = query.clone();
+        s.app.scroll = 0.0;
+        s.app.status = query.as_ref().map(|_| ("查询中…".into(), false));
+        s.worker.send(Command::SetModelFilter(query));
+    });
+    invalidate(hwnd);
+}
+
 /// Render a frame into an off-screen bitmap and present it with a single
 /// `BitBlt`. Centralises the double-buffer scaffolding shared by `paint` and
 /// `paint_detail`, and bails out cleanly if either GDI allocation fails
@@ -1746,6 +1823,10 @@ fn paint(hwnd: HWND) {
                         pinned: s.app.config.pin_position,
                         filter: s.app.filter,
                         hidden_fields: &s.app.config.hidden_fields,
+                        id_query: s.app.id_query.as_deref(),
+                        id_draft: &s.app.id_draft,
+                        id_editing: s.app.id_editing,
+                        id_caret: s.app.id_caret,
                     };
                     panel::draw(&painter, &s.fonts, m, &view);
                 }
@@ -1775,6 +1856,10 @@ fn on_timer(hwnd: HWND, id: usize, actions: &mut Vec<Action>) {
         TIMER_CARET => {
             // Blink the caret while a text field holds focus.
             let blink = State::with(|s| {
+                if s.app.id_editing {
+                    s.app.id_caret = !s.app.id_caret;
+                    return true;
+                }
                 if !s.app.is_login() {
                     return false;
                 }
@@ -1865,19 +1950,19 @@ fn rebuild_doc(open: &mut DetailPopup) {
         .map(|executions| detail::Doc::build(&open.row, executions, now_unix(), open.depth));
 }
 
-/// The window must be activatable exactly while the sign-in form is showing.
-/// Called after anything that can change the view, and cheap enough to run
-/// unconditionally: it only queues work on an actual transition.
+/// The window must accept focus while the sign-in form is up, and while the
+/// header id field is being typed in. A poll must not take it away mid-entry.
 fn sync_activation(actions: &mut Vec<Action>) {
-    let wants = State::with(|s| s.app.is_login()).unwrap_or(false);
+    let wants = State::with(|s| s.app.is_login() || s.app.id_editing).unwrap_or(false);
     let has = State::with(|s| s.activatable).unwrap_or(wants);
     if wants != has {
         actions.push(Action::SetActivatable(wants));
     }
 }
 
-/// Add or remove `WS_EX_NOACTIVATE`, taking the keyboard when enabling.
-fn apply_activation(hwnd: HWND, enabled: bool) {
+/// Add or remove `WS_EX_NOACTIVATE`. The style is cached, so it is flushed
+/// before anything tries to focus a child of this window.
+pub(crate) fn apply_activation(hwnd: HWND, enabled: bool) {
     unsafe {
         let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let no_activate = WS_EX_NOACTIVATE.0 as isize;
@@ -1888,9 +1973,21 @@ fn apply_activation(hwnd: HWND, enabled: bool) {
         };
         if next != current {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
         }
     }
-    if enabled && !settings_window::is_visible() {
+    // Both the sign-in form and the header id field are drawn by the panel,
+    // so the panel itself takes the keyboard.
+    let typing = State::with(|s| s.app.is_login() || s.app.id_editing).unwrap_or(false);
+    if enabled && !settings_window::is_visible() && typing {
         unsafe {
             let _ = SetForegroundWindow(hwnd);
             let _ = SetFocus(Some(hwnd));
@@ -1966,6 +2063,23 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
         && panel::settings_button(m).contains(x, y)
     {
         actions.push(Action::ShowSettings(popup::click_point(hwnd, lp)));
+        return;
+    }
+
+    // A click that lands on the well around the edit (its border is a pixel
+    // or two wider than the control) still has to put the caret there.
+    if State::with(|s| !s.app.is_login()).unwrap_or(false) && panel::id_box_rect(m).contains(x, y) {
+        State::with(|s| {
+            s.app.id_editing = true;
+            s.app.id_caret = true;
+            s.activatable = true;
+        });
+        apply_activation(hwnd, true);
+        unsafe {
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+        }
+        actions.push(Action::Redraw);
         return;
     }
 
@@ -2109,6 +2223,10 @@ fn list_view(s: &State) -> ListView<'_> {
         pinned: s.app.config.pin_position,
         filter: s.app.filter,
         hidden_fields: &s.app.config.hidden_fields,
+        id_query: s.app.id_query.as_deref(),
+        id_draft: &s.app.id_draft,
+        id_editing: s.app.id_editing,
+        id_caret: s.app.id_caret,
     }
 }
 
@@ -2164,8 +2282,17 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
         if ctrl_down() {
             return;
         }
-        let changed = State::with(|s| s.app.login.as_mut().map(|f| f.insert(ch)));
-        if changed.flatten().is_some() {
+        let changed = State::with(|s| {
+            if s.app.id_editing {
+                type_id_char(&mut s.app, ch)
+            } else if let Some(form) = s.app.login.as_mut() {
+                form.insert(ch);
+                true
+            } else {
+                false
+            }
+        });
+        if changed == Some(true) {
             actions.push(Action::Redraw);
         }
         return;
@@ -2209,7 +2336,24 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
 
     let mut quit = false;
     let mut submit = false;
+    let mut lookup = false;
     let handled = State::with(|s| {
+        if s.app.id_editing {
+            match vk {
+                v if v == VK_BACK.0 => {
+                    s.app.id_draft.pop();
+                    s.app.id_caret = true;
+                }
+                v if v == VK_RETURN.0 => lookup = true,
+                v if v == VK_ESCAPE.0 => {
+                    s.app.id_draft.clear();
+                    s.app.id_editing = false;
+                    lookup = true;
+                }
+                _ => return false,
+            }
+            return true;
+        }
         if s.app.is_login() {
             let Some(form) = s.app.login.as_mut() else {
                 return false;
@@ -2243,7 +2387,14 @@ fn on_key(hwnd: HWND, msg: u32, wp: WPARAM, actions: &mut Vec<Action>) {
         }
         return;
     }
-    if submit {
+    if lookup {
+        // Escape clears the box, which also drops the filter.
+        if State::with(|s| !s.app.id_editing).unwrap_or(false) {
+            apply_activation(hwnd, false);
+            State::with(|s| s.activatable = false);
+        }
+        submit_id_query(hwnd);
+    } else if submit {
         actions.push(Action::SignIn);
     } else if handled == Some(true) {
         actions.push(Action::Redraw);

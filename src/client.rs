@@ -202,12 +202,29 @@ impl Client {
         project_id: &str,
         first: i64,
     ) -> Result<(Vec<Request>, i64), ApiError> {
+        self.fetch_requests_where(url, token, project_id, first, None)
+    }
+
+    /// `model_id` is the console's `modelID` filter (`modelIDContainsFold`).
+    /// `None` is the unfiltered list.
+    pub fn fetch_requests_where(
+        &self,
+        url: &str,
+        token: &str,
+        project_id: &str,
+        first: i64,
+        model_id: Option<&str>,
+    ) -> Result<(Vec<Request>, i64), ApiError> {
+        let mut where_clause = json!({ "projectID": project_id });
+        if let Some(model) = model_id {
+            where_clause["modelIDContainsFold"] = json!(model);
+        }
         let body = json!({
             "query": REQUESTS_QUERY,
             "operationName": "GetRequests",
             "variables": {
                 "first": first,
-                "where": { "projectID": project_id },
+                "where": where_clause,
                 "orderBy": { "field": "CREATED_AT", "direction": "DESC" }
             }
         });

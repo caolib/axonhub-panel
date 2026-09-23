@@ -40,6 +40,10 @@ const ACCENT_INSET: f32 = 5.0;
 const FILTER_W: f32 = 46.0;
 const FILTER_H: f32 = 20.0;
 const FILTER_GAP: f32 = 4.0;
+/// Header id field, sitting just left of the settings button. A full GUID is
+/// wider than this, so the draw keeps the end of the text in view.
+const ID_BOX_W: f32 = 120.0;
+const ID_BOX_H: f32 = 20.0;
 /// Chip order on the header, left to right.
 const FILTERS: [Filter; 4] = [
     Filter::All,
@@ -171,6 +175,13 @@ pub struct ListView<'a> {
     pub filter: FilterMask,
     /// Card cells the user switched off; everything else is drawn.
     pub hidden_fields: &'a [DisplayField],
+    /// The request GUID the list was narrowed to, if the header box was submitted.
+    pub id_query: Option<&'a str>,
+    /// Digits typed into the header box.
+    pub id_draft: &'a str,
+    /// The header box holds the keyboard, so it draws a caret.
+    pub id_editing: bool,
+    pub id_caret: bool,
 }
 
 impl ListView<'_> {
@@ -203,6 +214,35 @@ pub fn settings_button(m: Metrics) -> Rect {
         y: (m.header_h - 20.0 * m.scale) / 2.0,
         w: 40.0 * m.scale,
         h: 20.0 * m.scale,
+    }
+}
+
+/// The tail of `text` that fits in `width`. Typing grows to the right, so the
+/// caret stays at the end of the visible part.
+fn fitting_tail<'a>(p: &Painter, font: &theme::DualFont, text: &'a str, width: f32) -> &'a str {
+    if p.dual_measure(font, text) <= width {
+        return text;
+    }
+    let mut start = 0;
+    for (i, _) in text.char_indices() {
+        if p.dual_measure(font, &text[i..]) <= width {
+            start = i;
+            break;
+        }
+        start = i;
+    }
+    &text[start..]
+}
+
+/// The header's id field, immediately left of the settings button.
+pub fn id_box_rect(m: Metrics) -> Rect {
+    let settings = settings_button(m);
+    let s = m.scale;
+    Rect {
+        x: settings.x - 6.0 * s - ID_BOX_W * s,
+        y: (m.header_h - ID_BOX_H * s) / 2.0,
+        w: ID_BOX_W * s,
+        h: ID_BOX_H * s,
     }
 }
 
@@ -245,7 +285,61 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         settings_text,
         theme::ALIGN_CENTER,
     );
-    let right = settings.x - 8.0 * s;
+    // Counts stop at the left edge of the id field.
+    let id_box = id_box_rect(m);
+    p.round_rect(
+        id_box.x,
+        id_box.y,
+        id_box.w,
+        id_box.h,
+        3.0 * s,
+        theme::INPUT_BG,
+        true,
+    );
+    p.round_rect(
+        id_box.x,
+        id_box.y,
+        id_box.w,
+        id_box.h,
+        3.0 * s,
+        theme::INPUT_BORDER,
+        false,
+    );
+    let pad = 5.0 * s;
+    let inner_w = (id_box.w - pad * 2.0).max(0.0);
+    let placeholder = v.id_draft.is_empty() && !v.id_editing;
+    // A full GUID is wider than the box; keep its tail, where the caret sits.
+    let visible = if placeholder {
+        "ID"
+    } else {
+        fitting_tail(p, &fonts.small, v.id_draft, inner_w)
+    };
+    p.dual_text(
+        &fonts.small,
+        visible,
+        id_box.x + pad,
+        id_box.y,
+        inner_w,
+        id_box.h,
+        if placeholder {
+            theme::TEXT_FAINT
+        } else {
+            theme::TEXT
+        },
+        theme::ALIGN_NEAR,
+    );
+    if v.id_editing && v.id_caret {
+        let tw = p.dual_measure(&fonts.small, visible).min(inner_w);
+        let cx = id_box.x + pad + tw;
+        p.fill_rect(
+            cx,
+            id_box.y + 4.0 * s,
+            s.max(1.0),
+            id_box.h - 8.0 * s,
+            theme::TEXT,
+        );
+    }
+    let right = id_box.x - 8.0 * s;
 
     let blue_str = blue_num.to_string();
     let gray_text = if blue_num > 0 {
@@ -377,9 +471,14 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
 
 fn draw_rows(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     if v.rows.is_empty() {
+        let label = if v.id_query.is_some() {
+            "未找到该模型"
+        } else {
+            "等待数据…"
+        };
         p.dual_text(
             &fonts.body,
-            "等待数据…",
+            label,
             0.0,
             m.rows_top() + m.rows_viewport_h() / 2.0 - 10.0 * m.scale,
             m.width,
