@@ -142,7 +142,7 @@ fn sync_scale(hwnd: HWND) {
         return;
     }
     State::with(|s| {
-        s.fonts = Fonts::load(scale, &s.app.config.font_family);
+        s.fonts = Fonts::load(scale, &s.app.config.font_family, &s.app.config.cjk_font_family);
         s.scale = scale;
     });
 
@@ -651,7 +651,7 @@ fn main() {
         let state = State {
             app,
             worker,
-            fonts: Fonts::load(1.0, &config.font_family),
+            fonts: Fonts::load(1.0, &config.font_family, &config.cjk_font_family),
             detail: None,
             settings: None,
             settings_login: None,
@@ -723,7 +723,7 @@ fn main() {
         // monitor the window actually landed on.
         let scale = window_scale(hwnd);
         State::with(|s| {
-            s.fonts = Fonts::load(scale, &s.app.config.font_family);
+            s.fonts = Fonts::load(scale, &s.app.config.font_family, &s.app.config.cjk_font_family);
             s.scale = scale;
         });
 
@@ -1220,7 +1220,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 1.0
             };
             State::with(|s| {
-                s.fonts = Fonts::load(scale, &s.app.config.font_family);
+                s.fonts = Fonts::load(scale, &s.app.config.font_family, &s.app.config.cjk_font_family);
                 s.scale = scale;
             });
 
@@ -1500,7 +1500,11 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 }
                 let detail = State::with(|s| {
                     s.app.config.font_family = name;
-                    s.fonts = Fonts::load(s.scale, &s.app.config.font_family);
+                    s.fonts = Fonts::load(
+                        s.scale,
+                        &s.app.config.font_family,
+                        &s.app.config.cjk_font_family,
+                    );
                     s.app.save();
                     s.detail.as_ref().map(|p| p.hwnd)
                 })
@@ -2145,8 +2149,13 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
         // card or switch filters, only the right-click menu opens the detail
         // page.
         if let Some(f) = panel::hit_filter(m, &list_view(s), x, y) {
-            s.app.click_filter(f);
-            s.app.scroll = 0.0;
+            if s.app.click_filter(f) {
+                let statuses = model::status_in(s.app.filter)
+                    .map(|values| values.into_iter().map(str::to_string).collect());
+                s.app.scroll = 0.0;
+                s.app.status = Some(("查询中…".into(), false));
+                s.worker.send(Command::SetStatusFilter(statuses));
+            }
             redraw = true;
         } else if !s.app.config.pin_position
             && let Some(index) = panel::hit_row(m, &list_view(s), x, y)

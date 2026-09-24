@@ -18,15 +18,19 @@ query GetRequests($first: Int, $where: RequestWhereInput, $orderBy: RequestOrder
       node {
         id
         createdAt
+        updatedAt
         status
         modelID
         format
         reasoningEffort
         stream
+        source
+        clientIP
         apiKey { name }
         channel { name }
         metricsLatencyMs
         metricsFirstTokenLatencyMs
+        metricsReasoningDurationMs
         executions(first: 10, orderBy: { field: CREATED_AT, direction: DESC }) {
           edges { node { modelID status format reasoningEffort passThroughApplied channel { name } } }
           totalCount
@@ -40,6 +44,7 @@ query GetRequests($first: Int, $where: RequestWhereInput, $orderBy: RequestOrder
               totalTokens
               promptCachedTokens
               promptWriteCachedTokens
+              totalCost
             }
           }
         }
@@ -202,11 +207,12 @@ impl Client {
         project_id: &str,
         first: i64,
     ) -> Result<(Vec<Request>, i64), ApiError> {
-        self.fetch_requests_where(url, token, project_id, first, None)
+        self.fetch_requests_where(url, token, project_id, first, None, None)
     }
 
     /// `model_id` is the console's `modelID` filter (`modelIDContainsFold`).
-    /// `None` is the unfiltered list.
+    /// `statuses` is `statusIn`; `None` omits the field, which is the
+    /// unfiltered page. An empty slice is not the same thing and matches nothing.
     pub fn fetch_requests_where(
         &self,
         url: &str,
@@ -214,10 +220,14 @@ impl Client {
         project_id: &str,
         first: i64,
         model_id: Option<&str>,
+        statuses: Option<&[&str]>,
     ) -> Result<(Vec<Request>, i64), ApiError> {
         let mut where_clause = json!({ "projectID": project_id });
         if let Some(model) = model_id {
             where_clause["modelIDContainsFold"] = json!(model);
+        }
+        if let Some(statuses) = statuses {
+            where_clause["statusIn"] = json!(statuses);
         }
         let body = json!({
             "query": REQUESTS_QUERY,

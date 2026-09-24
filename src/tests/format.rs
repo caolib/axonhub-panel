@@ -42,6 +42,24 @@ fn missing_timestamp_is_a_dash() {
 }
 
 #[test]
+fn cost_keeps_sub_cent_precision() {
+    assert_eq!(cost(0.1388096), "$0.1388");
+    assert_eq!(cost(1.2), "$1.20");
+    assert_eq!(cost(0.01), "$0.0100");
+}
+
+#[test]
+fn latency_names_whichever_side_arrived() {
+    assert_eq!(
+        latency(Some(789_200), Some(456_500)).as_deref(),
+        Some("[789.2s/456.5s]")
+    );
+    assert_eq!(latency(Some(4_500), None).as_deref(), Some("[4.5s]"));
+    assert_eq!(latency(None, None), None);
+    assert_eq!(latency(Some(0), Some(0)), None);
+}
+
+#[test]
 fn spans_read_at_three_scales() {
     assert_eq!(duration_span(45), "45s");
     assert_eq!(duration_span(249), "4m09s");

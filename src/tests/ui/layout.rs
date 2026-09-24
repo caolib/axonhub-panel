@@ -4,9 +4,9 @@ use super::*;
 fn layout_scales_with_the_monitor() {
     let at_100 = Metrics::new(400.0, 800.0, 1.0);
     let at_150 = Metrics::new(600.0, 1200.0, 1.5);
-    assert_eq!(at_100.card_h, 44.0);
-    assert_eq!(at_150.card_h, 66.0);
-    assert_eq!(at_150.pitch(), 72.0);
+    assert_eq!(at_100.card_h, 68.0);
+    assert_eq!(at_150.card_h, 102.0);
+    assert_eq!(at_150.pitch(), 108.0);
     assert_eq!(at_150.pad(), 12.0);
 }
 

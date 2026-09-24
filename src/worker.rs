@@ -115,6 +115,9 @@ pub enum Command {
     /// Restrict the polled list with the console's `modelID` filter. `None`
     /// clears it and the next poll is the unfiltered page again.
     SetModelFilter(Option<String>),
+    /// Restrict the polled list with the console's `statusIn` filter. `None`
+    /// omits the field, so every status comes back.
+    SetStatusFilter(Option<Vec<String>>),
     Shutdown,
 }
 
@@ -191,6 +194,7 @@ fn apply_command(
     pending_detail: &mut Option<(String, String)>,
     pending_probe: &mut Option<String>,
     id_filter: &mut Option<String>,
+    status_filter: &mut Option<Vec<String>>,
 ) -> bool {
     match command {
         Command::Shutdown => return true,
@@ -220,6 +224,11 @@ fn apply_command(
             *next_poll = Instant::now();
             *force = true;
         }
+        Command::SetStatusFilter(statuses) => {
+            *status_filter = statuses;
+            *next_poll = Instant::now();
+            *force = true;
+        }
     }
     false
 }
@@ -240,6 +249,7 @@ fn run(
     let mut pending_detail: Option<(String, String)> = None;
     let mut pending_probe: Option<String> = None;
     let mut id_filter: Option<String> = None;
+    let mut status_filter: Option<Vec<String>> = None;
     let mut next_poll = Instant::now();
     // Emit the signed-out notice once per transition rather than every idle
     // tick, which would otherwise force a pointless repaint each second.
@@ -261,6 +271,7 @@ fn run(
                 &mut pending_detail,
                 &mut pending_probe,
                 &mut id_filter,
+                &mut status_filter,
             ) {
                 shutdown = true;
             }
@@ -359,12 +370,16 @@ fn run(
                     continue;
                 };
                 polled = true;
+                let statuses: Option<Vec<&str>> = status_filter
+                    .as_ref()
+                    .map(|values| values.iter().map(String::as_str).collect());
                 match client.fetch_requests_where(
                     &target.graphql_url(),
                     &token,
                     &target.project_id,
                     config.row_limit,
                     id_filter.as_deref(),
+                    statuses.as_deref(),
                 ) {
                     Ok((requests, total)) => {
                         cycle.total += total;
@@ -468,6 +483,7 @@ fn run(
                         &mut pending_detail,
                         &mut pending_probe,
                         &mut id_filter,
+                        &mut status_filter,
                     ) {
                         return;
                     }

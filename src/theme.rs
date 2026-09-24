@@ -171,24 +171,34 @@ pub fn font_available(name: &str) -> bool {
 }
 
 impl Fonts {
-    pub fn load(scale: f32, preferred: &str) -> Self {
+    /// `latin` draws digits and punctuation; `cjk` draws Chinese. An empty
+    /// name falls back: Chinese shares the Latin face when that face has
+    /// Chinese glyphs, otherwise both sides walk the built-in chain.
+    pub fn load(scale: f32, latin: &str, cjk: &str) -> Self {
         let defaults = [
             "JetBrainsLxgwNerdMono",
             "Maple Mono NF CN",
             "Microsoft YaHei UI",
             "Segoe UI",
         ];
-        let selected = if preferred.is_empty() {
+        let selected = if latin.is_empty() {
             std::ptr::null_mut()
         } else {
-            family(preferred)
+            family(latin)
         };
         let latin_family = if selected.is_null() {
             pick(&defaults)
         } else {
             selected
         };
-        let cjk_family = if selected.is_null() || crate::font_catalog::supports_chinese(preferred) {
+        let chosen_cjk = if cjk.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            family(cjk)
+        };
+        let cjk_family = if !chosen_cjk.is_null() {
+            chosen_cjk
+        } else if latin.is_empty() || crate::font_catalog::supports_chinese(latin) {
             latin_family
         } else {
             // A Latin-only face should not make Chinese labels unreadable.

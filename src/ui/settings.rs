@@ -495,8 +495,8 @@ impl Layout {
             })
             .collect();
         self.check_grid(108.0, rows, 2);
-        // Seven rows of checkboxes: the button above plus 7*36 of grid.
-        self.content_height = 108.0 + 7.0 * 36.0 + 12.0;
+        let grid_rows = DisplayField::ALL.len().div_ceil(2);
+        self.content_height = 108.0 + grid_rows as f32 * 36.0 + 12.0;
     }
 
     fn accounts(&mut self, app: &App) {
@@ -638,10 +638,17 @@ impl Layout {
     }
 
     fn fonts(&mut self, app: &App, state: &State) {
-        let current = if app.config.font_family.is_empty() {
-            "自动选择默认字体"
-        } else {
-            &app.config.font_family
+        let current = match (
+            app.config.font_family.is_empty(),
+            app.config.cjk_font_family.is_empty(),
+        ) {
+            (true, true) => "自动选择默认字体".to_string(),
+            (false, true) => app.config.font_family.clone(),
+            (true, false) => format!("默认 · {}", app.config.cjk_font_family),
+            (false, false) => format!(
+                "{} · {}",
+                app.config.font_family, app.config.cjk_font_family
+            ),
         };
         self.font_header = Some(format!("当前字体 · {current}"));
         self.button(

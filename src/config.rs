@@ -69,8 +69,12 @@ pub struct Config {
     /// reads. Adjustable from the settings field and the right-click menu, and
     /// clamped to `FONT_SIZE_MIN..=FONT_SIZE_MAX` on load.
     pub font_size: f32,
-    /// Installed font family; empty uses the built-in fallback chain.
+    /// Installed font family for Latin, digits and punctuation. Empty uses
+    /// the built-in fallback chain.
     pub font_family: String,
+    /// Installed font family for Chinese. Empty follows `font_family` when
+    /// that face has Chinese glyphs, otherwise the built-in fallback chain.
+    pub cjk_font_family: String,
     /// Draw every card as a single line instead of two, halving the card
     /// height. Toggled from the right-click menu; the window is resized to keep
     /// the same row count, so the panel gets shorter rather than denser.
@@ -138,6 +142,7 @@ impl Default for Config {
             token_env_var: "AXONHUB_ACCESS_TOKEN".into(),
             font_size: 12.5,
             font_family: String::new(),
+            cjk_font_family: String::new(),
             single_line: false,
             opacity: 100,
             always_on_top: true,
@@ -235,6 +240,14 @@ pub enum DisplayField {
     Speed,
     /// 重试: attempts beyond the first.
     Retry,
+    /// 费用: billed cost of the request.
+    Cost,
+    /// 耗时: total latency and time to first token.
+    Latency,
+    /// 补全: completion tokens, with the reasoning share called out.
+    Completion,
+    /// 来源: where the request entered, and the client address.
+    Source,
     /// 账号: which saved login the request came from.
     Account,
     /// 创建时间: relative timestamp.
@@ -243,7 +256,7 @@ pub enum DisplayField {
 
 impl DisplayField {
     /// Every cell, in settings order.
-    pub const ALL: [DisplayField; 13] = [
+    pub const ALL: [DisplayField; 17] = [
         DisplayField::Stream,
         DisplayField::Conversion,
         DisplayField::PassThrough,
@@ -255,6 +268,10 @@ impl DisplayField {
         DisplayField::Cache,
         DisplayField::Speed,
         DisplayField::Retry,
+        DisplayField::Cost,
+        DisplayField::Latency,
+        DisplayField::Completion,
+        DisplayField::Source,
         DisplayField::Account,
         DisplayField::CreatedAt,
     ];
@@ -274,6 +291,10 @@ impl DisplayField {
             DisplayField::Cache => "缓存 · 命中率",
             DisplayField::Speed => "速度 · tok/s",
             DisplayField::Retry => "重试次数",
+            DisplayField::Cost => "费用",
+            DisplayField::Latency => "耗时 · [总/首字]",
+            DisplayField::Completion => "补全 · 输出词元",
+            DisplayField::Source => "来源 · 入口与 IP",
             DisplayField::Account => "账号标签",
             DisplayField::CreatedAt => "创建时间",
         }

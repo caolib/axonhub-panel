@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::{Status, mask_matches};
+use crate::model::{Status, status_in};
 use crate::ui::layout::Metrics;
 
 fn view<'a>(rows: &'a [Row], pinned: bool) -> ListView<'a> {
@@ -35,7 +35,7 @@ fn both_layouts_fit_their_card_height() {
             // One line: the chip is the tallest element.
             c.chip_h()
         } else {
-            c.line1 + c.gap + c.line2
+            c.line1 + c.gap + c.line2 + c.gap + c.line2
         };
         assert!(
             content <= band + 0.01,
@@ -99,11 +99,14 @@ fn row(status: Status) -> Row {
         account_id: String::new(),
         account_name: String::new(),
         created_at: None,
+        updated_at: None,
         status,
         model: String::new(),
         routed_model: None,
         channel: None,
         caller: None,
+        source: None,
+        client_ip: None,
         format: None,
         reasoning_effort: None,
         upstream_format: None,
@@ -111,9 +114,14 @@ fn row(status: Status) -> Row {
         stream: false,
         latency_ms: None,
         first_token_ms: None,
+        reasoning_ms: None,
         prompt_tokens: 0,
+        completion_tokens: 0,
+        reasoning_tokens: 0,
         total_tokens: 0,
         cached_tokens: 0,
+        write_cached_tokens: 0,
+        total_cost: None,
         attempt_count: 0,
         failed_attempts: 0,
         attempts_truncated: false,
@@ -248,27 +256,35 @@ fn the_palette_wraps_past_its_last_entry() {
 }
 
 #[test]
-fn filter_matches_status() {
-    // The empty mask shows everything, including Canceled.
-    assert!(mask_matches(model::FILTER_NONE, Status::Canceled));
-    assert!(mask_matches(model::FILTER_COMPLETED, Status::Completed));
-    assert!(!mask_matches(model::FILTER_COMPLETED, Status::Failed));
-    assert!(mask_matches(model::FILTER_FAILED, Status::Failed));
-    assert!(!mask_matches(model::FILTER_FAILED, Status::Pending));
-    assert!(mask_matches(model::FILTER_ACTIVE, Status::Processing));
-    assert!(mask_matches(model::FILTER_ACTIVE, Status::Pending));
-    assert!(!mask_matches(model::FILTER_ACTIVE, Status::Completed));
-    // Combined masks accept either state.
-    assert!(mask_matches(
-        model::FILTER_COMPLETED | model::FILTER_ACTIVE,
-        Status::Processing
-    ));
-    assert!(mask_matches(
-        model::FILTER_COMPLETED | model::FILTER_ACTIVE,
-        Status::Completed
-    ));
-    assert!(!mask_matches(
-        model::FILTER_COMPLETED | model::FILTER_ACTIVE,
-        Status::Failed
-    ));
+fn filter_mask_becomes_status_in() {
+    // The empty mask omits the field, so canceled still comes back.
+    assert_eq!(status_in(model::FILTER_NONE), None);
+    assert_eq!(
+        status_in(model::FILTER_COMPLETED).as_deref(),
+        Some(&["completed"][..])
+    );
+    assert_eq!(
+        status_in(model::FILTER_FAILED).as_deref(),
+        Some(&["failed"][..])
+    );
+    assert_eq!(
+        status_in(model::FILTER_ACTIVE).as_deref(),
+        Some(&["processing"][..])
+    );
+    assert_eq!(
+        status_in(model::FILTER_PENDING).as_deref(),
+        Some(&["pending"][..])
+    );
+    assert_eq!(
+        status_in(model::FILTER_CANCELED).as_deref(),
+        Some(&["canceled"][..])
+    );
+    assert_eq!(
+        status_in(model::FILTER_COMPLETED | model::FILTER_ACTIVE).as_deref(),
+        Some(&["completed", "processing"][..])
+    );
+    assert_eq!(
+        status_in(model::FILTER_COMPLETED | model::FILTER_FAILED).as_deref(),
+        Some(&["completed", "failed"][..])
+    );
 }

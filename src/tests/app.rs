@@ -7,11 +7,14 @@ fn row(status: Status) -> Row {
         account_id: String::new(),
         account_name: String::new(),
         created_at: None,
+        updated_at: None,
         status,
         model: String::new(),
         routed_model: None,
         channel: None,
         caller: None,
+        source: None,
+        client_ip: None,
         format: None,
         reasoning_effort: None,
         upstream_format: None,
@@ -19,9 +22,14 @@ fn row(status: Status) -> Row {
         stream: false,
         latency_ms: None,
         first_token_ms: None,
+        reasoning_ms: None,
         prompt_tokens: 0,
+        completion_tokens: 0,
+        reasoning_tokens: 0,
         total_tokens: 0,
         cached_tokens: 0,
+        write_cached_tokens: 0,
+        total_cost: None,
         attempt_count: 1,
         failed_attempts: 0,
         attempts_truncated: false,
@@ -43,63 +51,48 @@ fn seeded() -> App {
 }
 
 #[test]
-fn filter_keeps_only_matching_rows() {
+fn filter_click_sets_the_mask_and_drops_the_stale_page() {
     let mut app = seeded();
     assert_eq!(app.rows.len(), 5);
 
-    app.click_filter(Filter::Completed);
-    assert_eq!(app.rows.len(), 1);
-    assert_eq!(app.rows[0].status, Status::Completed);
+    // Status is applied by the next poll, so the previous page is cleared
+    // rather than shown as if it were already filtered.
+    assert!(app.click_filter(Filter::Completed));
+    assert_eq!(app.filter, model::FILTER_COMPLETED);
+    assert!(app.rows.is_empty());
+    assert_eq!(app.total, 0);
 
-    app.click_filter(Filter::All);
-    assert_eq!(app.rows.len(), 5);
+    assert!(app.click_filter(Filter::All));
+    assert_eq!(app.filter, model::FILTER_NONE);
 
-    // 进行 covers both Processing and Pending, mirroring `is_active`.
-    app.click_filter(Filter::Active);
-    assert_eq!(app.rows.len(), 2);
-    assert!(app.rows.iter().all(|r| r.status.is_active()));
+    assert!(app.click_filter(Filter::Active));
+    assert_eq!(app.filter, model::FILTER_ACTIVE);
 
-    app.click_filter(Filter::All);
-    app.click_filter(Filter::Failed);
-    assert_eq!(app.rows.len(), 1);
-    assert_eq!(app.rows[0].status, Status::Failed);
+    assert!(app.click_filter(Filter::All));
+    assert!(app.click_filter(Filter::Failed));
+    assert_eq!(app.filter, model::FILTER_FAILED);
 
-    app.click_filter(Filter::All);
-    assert_eq!(app.rows.len(), 5);
+    // 全部 while the mask is already empty changes nothing.
+    assert!(app.click_filter(Filter::All));
+    assert_eq!(app.filter, model::FILTER_NONE);
+    assert!(!app.click_filter(Filter::All));
 }
 
 #[test]
 fn chips_combine_and_toggle_independently() {
     let mut app = seeded();
 
-    // 成功 + 进行 selected at once.
-    app.click_filter(Filter::Completed);
-    app.click_filter(Filter::Active);
-    assert_eq!(app.rows.len(), 3);
-    assert!(
-        app.rows
-            .iter()
-            .all(|r| { r.status == Status::Completed || r.status.is_active() })
-    );
+    assert!(app.click_filter(Filter::Completed));
+    assert!(app.click_filter(Filter::Active));
+    assert_eq!(app.filter, model::FILTER_COMPLETED | model::FILTER_ACTIVE);
 
     // Toggling one off keeps the other.
-    app.click_filter(Filter::Active);
-    assert_eq!(app.rows.len(), 1);
-    assert_eq!(app.rows[0].status, Status::Completed);
+    assert!(app.click_filter(Filter::Active));
+    assert_eq!(app.filter, model::FILTER_COMPLETED);
 
-    // Toggling the last one off returns to the full list.
-    app.click_filter(Filter::Completed);
-    assert_eq!(app.rows.len(), 5);
+    // Toggling the last one off returns to the unfiltered query.
+    assert!(app.click_filter(Filter::Completed));
     assert_eq!(app.filter, model::FILTER_NONE);
-}
-
-#[test]
-fn total_always_counts_every_source_row() {
-    let mut app = seeded();
-    let total_was = app.total;
-    app.click_filter(Filter::Failed);
-    assert_eq!(app.total, total_was);
-    assert_eq!(app.rows.len(), 1);
 }
 
 #[test]

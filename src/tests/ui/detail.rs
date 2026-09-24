@@ -60,11 +60,14 @@ fn row() -> Row {
         account_id: String::new(),
         account_name: String::new(),
         created_at: Some("2026-09-18T11:28:03Z".into()),
+        updated_at: None,
         status: Status::Failed,
         model: "glm-5.3-flash".into(),
         routed_model: None,
         channel: Some("ch-a".into()),
         caller: Some("cc".into()),
+        source: Some("api".into()),
+        client_ip: Some("::1".into()),
         format: Some("chat".into()),
         reasoning_effort: Some("max".into()),
         upstream_format: Some("chat".into()),
@@ -72,9 +75,14 @@ fn row() -> Row {
         stream: false,
         latency_ms: Some(269_000),
         first_token_ms: None,
+        reasoning_ms: None,
         prompt_tokens: 900,
+        completion_tokens: 300,
+        reasoning_tokens: 0,
         total_tokens: 1200,
         cached_tokens: 0,
+        write_cached_tokens: 0,
+        total_cost: Some(0.1388096),
         attempt_count: 2,
         failed_attempts: 1,
         attempts_truncated: false,
@@ -99,6 +107,10 @@ fn the_full_document_carries_every_channel_code_and_error() {
     let doc = Doc::build(&row(), &executions(), 1_789_179_657, Depth::Full);
     let text = plain_text(&doc);
 
+    assert!(text.contains("调用者: cc"), "{text}");
+    assert!(text.contains("来源: api · ::1"), "{text}");
+    assert!(text.contains("费用: $0.1388"), "{text}");
+    assert!(text.contains("出 300"), "{text}");
     assert!(text.contains("状态: 失败"), "{text}");
     assert!(text.contains("模型: glm-5.3-flash(max)"), "{text}");
     assert!(text.contains("执行 2 次"), "{text}");

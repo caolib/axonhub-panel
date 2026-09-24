@@ -40,9 +40,8 @@ pub struct NamedRef {
     pub name: Option<String>,
 }
 
-/// The API key name a request arrived with. The owning user is not fetched:
-/// the panel identifies the caller by key, which is what the key is for.
 impl NamedRef {
+    /// A blank name is the same as none. Channel names go through this too.
     pub fn non_empty_name(&self) -> Option<String> {
         self.name
             .as_deref()
@@ -56,8 +55,14 @@ impl NamedRef {
 #[serde(rename_all = "camelCase")]
 pub struct UsageLog {
     pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub completion_reasoning_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
     pub prompt_cached_tokens: Option<i64>,
+    pub prompt_write_cached_tokens: Option<i64>,
+    /// Billed cost in the account's currency. AxonHub sends a JSON number,
+    /// which is a float even when the value is whole.
+    pub total_cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,17 +95,24 @@ impl Default for Execution {
 pub struct Request {
     pub id: String,
     pub created_at: Option<String>,
+    pub updated_at: Option<String>,
     pub status: Option<String>,
     #[serde(rename = "modelID")]
     pub model_id: Option<String>,
     pub format: Option<String>,
     pub reasoning_effort: Option<String>,
     pub stream: Option<bool>,
+    /// Where the request entered AxonHub (`api`, `playground`, …).
+    pub source: Option<String>,
+    /// `clientIP`, not `clientIp`: the acronym is spelled out in the schema.
+    #[serde(rename = "clientIP")]
+    pub client_ip: Option<String>,
     #[serde(rename = "apiKey")]
     pub api_key: Option<NamedRef>,
     pub channel: Option<NamedRef>,
     pub metrics_latency_ms: Option<i64>,
     pub metrics_first_token_latency_ms: Option<i64>,
+    pub metrics_reasoning_duration_ms: Option<i64>,
     pub executions: Option<Connection<Execution>>,
     pub usage_logs: Option<Connection<UsageLog>>,
 }
@@ -110,15 +122,19 @@ impl Default for Request {
         Request {
             id: String::new(),
             created_at: None,
+            updated_at: None,
             status: None,
             model_id: None,
             format: None,
             reasoning_effort: None,
             stream: None,
+            source: None,
+            client_ip: None,
             api_key: None,
             channel: None,
             metrics_latency_ms: None,
             metrics_first_token_latency_ms: None,
+            metrics_reasoning_duration_ms: None,
             executions: None,
             usage_logs: None,
         }
@@ -199,6 +215,13 @@ pub struct DetailData {
     pub node: Option<RequestWithExecutions>,
 }
 
+fn non_empty_owned(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
 /// Collapse a wire format string (`openai/chat_completions`,
 /// `anthropic/messages`, …) to the short badge shown on the card.
 fn normalize_format(f: &str) -> String {
@@ -223,6 +246,7 @@ pub struct Row {
     pub account_id: String,
     pub account_name: String,
     pub created_at: Option<String>,
+    pub updated_at: Option<String>,
     pub status: Status,
     pub model: String,
     /// Execution model when AxonHub routed to a model other than the request.
@@ -230,6 +254,10 @@ pub struct Row {
     pub channel: Option<String>,
     /// Name of the API key the request arrived with.
     pub caller: Option<String>,
+    /// Where the request entered (`api`, `playground`, …).
+    pub source: Option<String>,
+    /// Client address recorded on the request.
+    pub client_ip: Option<String>,
     pub format: Option<String>,
     pub reasoning_effort: Option<String>,
     /// Wire protocol used upstream; compared against `format` to show whether a
@@ -239,9 +267,17 @@ pub struct Row {
     pub stream: bool,
     pub latency_ms: Option<i64>,
     pub first_token_ms: Option<i64>,
+    pub reasoning_ms: Option<i64>,
     pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    /// Reasoning tokens included in `completion_tokens`.
+    pub reasoning_tokens: i64,
     pub total_tokens: i64,
     pub cached_tokens: i64,
+    /// Tokens written into the prompt cache on this request.
+    pub write_cached_tokens: i64,
+    /// Billed cost. `None` when the usage log has not arrived yet.
+    pub total_cost: Option<f64>,
     /// Number of upstream attempts; above one means retries happened.
     pub attempt_count: i64,
     /// How many of the fetched attempts did not succeed. A request that ended
@@ -270,8 +306,7 @@ impl Row {
         let channel = execution
             .and_then(|e| e.channel.as_ref())
             .or(req.channel.as_ref())
-            .and_then(|c| c.name.clone())
-            .filter(|n| !n.is_empty());
+            .and_then(NamedRef::non_empty_name);
 
         Row {
             id: req.id.clone(),
@@ -280,11 +315,14 @@ impl Row {
             account_id: String::new(),
             account_name: String::new(),
             created_at: req.created_at.clone(),
+            updated_at: req.updated_at.clone(),
             status: Status::parse(req.status.as_deref()),
             model: requested_model,
             routed_model,
             channel,
             caller: req.api_key.as_ref().and_then(NamedRef::non_empty_name),
+            source: non_empty_owned(req.source.as_deref()),
+            client_ip: non_empty_owned(req.client_ip.as_deref()),
             // The inbound protocol is the request's own; the upstream one is
             // what the execution actually spoke.
             format: req
@@ -307,9 +345,18 @@ impl Row {
             stream: req.stream.unwrap_or(false),
             latency_ms: req.metrics_latency_ms,
             first_token_ms: req.metrics_first_token_latency_ms,
+            reasoning_ms: req.metrics_reasoning_duration_ms,
             prompt_tokens: usage.and_then(|u| u.prompt_tokens).unwrap_or(0),
+            completion_tokens: usage.and_then(|u| u.completion_tokens).unwrap_or(0),
+            reasoning_tokens: usage
+                .and_then(|u| u.completion_reasoning_tokens)
+                .unwrap_or(0),
             total_tokens: usage.and_then(|u| u.total_tokens).unwrap_or(0),
             cached_tokens: usage.and_then(|u| u.prompt_cached_tokens).unwrap_or(0),
+            write_cached_tokens: usage
+                .and_then(|u| u.prompt_write_cached_tokens)
+                .unwrap_or(0),
+            total_cost: usage.and_then(|u| u.total_cost).filter(|c| *c > 0.0),
             attempt_count: req
                 .executions
                 .as_ref()
@@ -544,9 +591,10 @@ impl Status {
     }
 }
 
-/// Which request states the list shows. The header chips mirror this enum:
+/// Which request states the list asks for. The header chips mirror this enum:
 /// one chip per filter plus 全部 for the empty mask. Chips toggle
 /// independently, so any combination of states can be selected at once.
+/// The mask is sent as `RequestWhereInput.statusIn`, not applied locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Filter {
     #[default]
@@ -554,6 +602,8 @@ pub enum Filter {
     Completed,
     Failed,
     Active,
+    Pending,
+    Canceled,
 }
 
 /// Bitmask of selected `Filter`s; the empty mask shows everything (`All`).
@@ -563,6 +613,8 @@ pub const FILTER_NONE: FilterMask = 0;
 pub const FILTER_COMPLETED: FilterMask = 1 << 0;
 pub const FILTER_FAILED: FilterMask = 1 << 1;
 pub const FILTER_ACTIVE: FilterMask = 1 << 2;
+pub const FILTER_PENDING: FilterMask = 1 << 3;
+pub const FILTER_CANCELED: FilterMask = 1 << 4;
 
 impl Filter {
     /// Header chip labels.
@@ -572,6 +624,8 @@ impl Filter {
             Filter::Completed => "成功",
             Filter::Failed => "失败",
             Filter::Active => "进行",
+            Filter::Pending => "等待",
+            Filter::Canceled => "取消",
         }
     }
 
@@ -582,18 +636,34 @@ impl Filter {
             Filter::Completed => FILTER_COMPLETED,
             Filter::Failed => FILTER_FAILED,
             Filter::Active => FILTER_ACTIVE,
+            Filter::Pending => FILTER_PENDING,
+            Filter::Canceled => FILTER_CANCELED,
         }
     }
 }
 
-/// Whether a row with `status` passes the selected mask. The empty mask shows
-/// everything; otherwise only the chosen states are kept (进行 covers both
-/// Processing and Pending, mirroring `Status::is_active`).
-pub fn mask_matches(mask: FilterMask, status: Status) -> bool {
+/// `RequestWhereInput.statusIn` for a chip mask. `None` is the console's
+/// unfiltered query: the field is omitted and every status comes back.
+/// Each chip maps to one wire status, matching the requests page.
+pub fn status_in(mask: FilterMask) -> Option<Vec<&'static str>> {
     if mask == FILTER_NONE {
-        return true;
+        return None;
     }
-    (status == Status::Completed && mask & FILTER_COMPLETED != 0)
-        || (status == Status::Failed && mask & FILTER_FAILED != 0)
-        || (status.is_active() && mask & FILTER_ACTIVE != 0)
+    let mut out = Vec::new();
+    if mask & FILTER_COMPLETED != 0 {
+        out.push("completed");
+    }
+    if mask & FILTER_FAILED != 0 {
+        out.push("failed");
+    }
+    if mask & FILTER_ACTIVE != 0 {
+        out.push("processing");
+    }
+    if mask & FILTER_PENDING != 0 {
+        out.push("pending");
+    }
+    if mask & FILTER_CANCELED != 0 {
+        out.push("canceled");
+    }
+    Some(out)
 }

@@ -238,10 +238,16 @@ impl Doc {
             if let Some(caller) = non_empty(&row.caller) {
                 lines.push(field("调用者", caller, theme::TEXT_DIM));
             }
+            if let Some(origin) = origin_text(row) {
+                lines.push(field("来源", origin, theme::TEXT_DIM));
+            }
             lines.push(field("协议", protocol_text(row), theme::TEXT_DIM));
             lines.push(field("流式", yes_no(row.stream), theme::TEXT_DIM));
             lines.push(field("令牌", tokens_text(row), theme::TEXT_DIM));
             lines.push(field("耗时", timing_text(row), theme::TEXT_DIM));
+            if let Some(cost) = row.total_cost {
+                lines.push(field("费用", fmt::cost(cost), theme::TEXT_DIM));
+            }
             lines.push(field(
                 "时间",
                 format!(
@@ -251,6 +257,13 @@ impl Doc {
                 ),
                 theme::TEXT_DIM,
             ));
+            if row.updated_at.is_some() && row.updated_at != row.created_at {
+                lines.push(field(
+                    "更新",
+                    fmt::local_datetime(row.updated_at.as_deref()),
+                    theme::TEXT_DIM,
+                ));
+            }
             lines.push(Line::Gap);
         }
 
@@ -427,11 +440,37 @@ fn tokens_text(row: &Row) -> String {
     if row.total_tokens <= 0 {
         return fmt::DASH.into();
     }
-    let mut text = fmt::tokens_compact(row.total_tokens);
+    let mut text = format!(
+        "总 {} · 入 {}",
+        fmt::tokens_compact(row.total_tokens),
+        fmt::tokens_compact(row.prompt_tokens)
+    );
+    if row.completion_tokens > 0 {
+        text.push_str(&format!(" · 出 {}", fmt::tokens_compact(row.completion_tokens)));
+    }
+    if row.reasoning_tokens > 0 {
+        text.push_str(&format!(" · 思考 {}", fmt::tokens_compact(row.reasoning_tokens)));
+    }
     if let Some(rate) = row.cache_hit_rate() {
         text.push_str(&format!(" · 缓存 {rate:.1}%"));
     }
+    if row.write_cached_tokens > 0 {
+        text.push_str(&format!(
+            " · 写入 {}",
+            fmt::tokens_compact(row.write_cached_tokens)
+        ));
+    }
     text
+}
+
+/// `api · ::1`: where the request entered, and the address it came from.
+fn origin_text(row: &Row) -> Option<String> {
+    match (&row.source, &row.client_ip) {
+        (Some(source), Some(ip)) => Some(format!("{source} · {ip}")),
+        (Some(source), None) => Some(source.clone()),
+        (None, Some(ip)) => Some(ip.clone()),
+        (None, None) => None,
+    }
 }
 
 fn timing_text(row: &Row) -> String {
@@ -441,6 +480,9 @@ fn timing_text(row: &Row) -> String {
     }
     if let Some(ms) = row.first_token_ms {
         parts.push(format!("首字 {:.1}s", ms as f64 / 1000.0));
+    }
+    if let Some(ms) = row.reasoning_ms {
+        parts.push(format!("推理 {:.1}s", ms as f64 / 1000.0));
     }
     if let Some(tps) = row.tps() {
         parts.push(format!("{tps:.0} tok/s"));

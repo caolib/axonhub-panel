@@ -74,7 +74,7 @@ fn every_card_cell_has_a_checkbox_that_hits_its_own_cell() {
             Some(Action::Field(field)),
         );
     }
-    assert_eq!(DisplayField::ALL.len(), 13);
+    assert_eq!(DisplayField::ALL.len(), 17);
 }
 
 #[test]

@@ -123,7 +123,11 @@ pub fn open(owner: HWND, point: POINT) {
             hwnd,
             owner,
             scale,
-            fonts: Fonts::load(scale, &s.app.config.font_family),
+            fonts: Fonts::load(
+                scale,
+                &s.app.config.font_family,
+                &s.app.config.cjk_font_family,
+            ),
             ui,
             anchor: point,
             search: None,
@@ -161,7 +165,11 @@ pub fn is_visible() -> bool {
 pub fn reload_fonts() {
     PanelState::with(|s| {
         if let Some(p) = s.settings.as_mut() {
-            p.fonts = Fonts::load(p.scale, &s.app.config.font_family);
+            p.fonts = Fonts::load(
+            p.scale,
+            &s.app.config.font_family,
+            &s.app.config.cjk_font_family,
+        );
         }
     });
     redraw();
@@ -519,7 +527,11 @@ fn sync_scale(hwnd: HWND) {
         }
         let ratio = scale / p.scale;
         p.scale = scale;
-        p.fonts = Fonts::load(scale, &s.app.config.font_family);
+        p.fonts = Fonts::load(
+            scale,
+            &s.app.config.font_family,
+            &s.app.config.cjk_font_family,
+        );
         Some(ratio)
     })
     .flatten()

@@ -51,8 +51,8 @@ pub struct App {
     axon_rows: Vec<Row>,
     axon_total: i64,
     pub total: i64,
-    /// Selected status-filter bits applied on top of the merged list;
-    /// `FILTER_NONE` shows every row.
+    /// Selected status-filter bits, sent as `statusIn` on the next poll.
+    /// `FILTER_NONE` omits the field and asks for every status.
     pub filter: FilterMask,
     /// Model id the list is narrowed to, after the header box is submitted.
     /// `None` is the unfiltered page.
@@ -285,18 +285,13 @@ impl App {
     }
 
     /// Re-sort the display list, newest first, capped at the configured row
-    /// count, then drop rows that fail the status mask or that the user asked
-    /// to hide.
+    /// count, then drop rows the user asked to hide. Status chips are not
+    /// applied here: the worker sends them as `statusIn`.
     pub fn rebuild(&mut self) {
         let mut rows = self.axon_rows.clone();
         rows.sort_by_key(|row| std::cmp::Reverse(row.age_key()));
-        // A looked-up request is shown on its own, past the status chips and
-        // the hidden-channel list: those filters are what the lookup is for.
-        if self.id_query.is_none() && self.filter != model::FILTER_NONE {
-            rows.retain(|row| model::mask_matches(self.filter, row.status));
-        }
-        // Hidden channels drop out before the cap, so the visible count is
-        // still the newest N rows.
+        // A looked-up request is shown on its own, past the hidden-channel
+        // list: that filter is what the lookup is for.
         let hidden = &self.config.hidden_channels;
         if self.id_query.is_none() && !hidden.is_empty() {
             rows.retain(|row| {
@@ -343,18 +338,22 @@ impl App {
     }
 
     /// Apply a chip click: 全部 clears the mask, a status chip toggles its
-    /// bit, and the merged list is re-filtered.
-    pub fn click_filter(&mut self, chip: Filter) {
+    /// bit. Returns whether the mask changed. The caller re-polls; the
+    /// previous page is dropped so it is not read as the filtered result.
+    pub fn click_filter(&mut self, chip: Filter) -> bool {
         let next = if chip == Filter::All {
             model::FILTER_NONE
         } else {
             self.filter ^ chip.mask()
         };
         if next == self.filter {
-            return;
+            return false;
         }
         self.filter = next;
+        self.axon_rows.clear();
+        self.axon_total = 0;
         self.rebuild();
+        true
     }
 
     /// Persist anything that changed while running.

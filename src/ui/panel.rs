@@ -45,11 +45,13 @@ const FILTER_GAP: f32 = 4.0;
 const ID_BOX_W: f32 = 120.0;
 const ID_BOX_H: f32 = 20.0;
 /// Chip order on the header, left to right.
-const FILTERS: [Filter; 4] = [
+const FILTERS: [Filter; 6] = [
     Filter::All,
     Filter::Completed,
     Filter::Failed,
     Filter::Active,
+    Filter::Pending,
+    Filter::Canceled,
 ];
 
 /// Colour palette for channel and model names, shared by both so the two kinds
@@ -251,7 +253,7 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     let y = 6.0 * s;
 
     // Right side: active count and total, split by a separator. While a
-    // status filter is active the left number is the visible subset instead.
+    // status filter is active the left number is the page the server returned.
     let active = v.rows.iter().filter(|r| r.status.is_active()).count();
     let blue_num = if v.filter == model::FILTER_NONE {
         active
@@ -397,6 +399,8 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
                 Filter::Completed => theme::GREEN,
                 Filter::Failed => theme::RED,
                 Filter::Active => theme::BLUE,
+                Filter::Pending => theme::YELLOW,
+                Filter::Canceled => theme::GRAY,
             }
         } else {
             theme::TEXT_DIM
@@ -703,9 +707,9 @@ fn draw_card(
         }
     }
 
-    // Caller (API key name).
+    // Caller: the API key name only.
     if v.shows(DisplayField::Caller)
-        && let Some(caller) = &row.caller
+        && let Some(caller) = row.caller.as_deref()
     {
         let w = p.dual_measure(&fonts.small, caller);
         if x + w < cells_limit {
@@ -763,8 +767,21 @@ fn draw_card(
                 theme::TEXT_DIM,
                 theme::ALIGN_NEAR,
             );
+            x += w + 5.0 * m.scale;
         }
     }
+
+    draw_source(
+        p,
+        fonts,
+        row,
+        v,
+        line1_y,
+        &mut x,
+        cells_limit,
+        c.line1,
+        5.0 * m.scale,
+    );
 
     y += c.line1 + c.gap;
 
@@ -870,6 +887,15 @@ fn draw_card(
             );
         }
     }
+
+    y += c.line2 + c.gap;
+
+    // --- Line 3: cost, latency, completion. Right side stays empty so a long
+    // latency reading can use the whole card.
+    let line3_limit = rect.x + rect.w - c.inner_pad;
+    let mut x = text_x;
+    let gap = 6.0 * m.scale;
+    draw_usage_line(p, fonts, row, v, y, &mut x, line3_limit, c.line2, gap);
 }
 
 /// Compact card: every field on a single line, with the model chip as the only
@@ -1113,9 +1139,9 @@ fn draw_card_single(
         x += chip_w + gap;
     }
 
-    // Caller (API key name).
+    // Caller: the API key name only.
     if v.shows(DisplayField::Caller)
-        && let Some(caller) = &row.caller
+        && let Some(caller) = row.caller.as_deref()
     {
         let w = p.dual_measure(&fonts.small, caller);
         if x + w < limit {
@@ -1173,8 +1199,100 @@ fn draw_card_single(
                 },
                 theme::ALIGN_NEAR,
             );
+            x += w + gap;
         }
     }
+
+    draw_usage_line(p, fonts, row, v, small_y, &mut x, limit, c.line2, gap);
+    draw_source(p, fonts, row, v, small_y, &mut x, limit, c.line2, gap);
+}
+
+/// Cost, latency and completion tokens, drawn left to right until the line runs out.
+#[allow(clippy::too_many_arguments)]
+fn draw_usage_line(
+    p: &Painter,
+    fonts: &theme::Fonts,
+    row: &Row,
+    v: &ListView,
+    y: f32,
+    x: &mut f32,
+    limit: f32,
+    line_h: f32,
+    gap: f32,
+) {
+    if v.shows(DisplayField::Cost)
+        && let Some(value) = row.total_cost
+    {
+        place_cell(p, fonts, &fmt::cost(value), theme::YELLOW, y, x, limit, line_h, gap);
+    }
+    if v.shows(DisplayField::Latency)
+        && let Some(label) = fmt::latency(row.latency_ms, row.first_token_ms)
+    {
+        place_cell(p, fonts, &label, theme::TEXT_DIM, y, x, limit, line_h, gap);
+    }
+    if v.shows(DisplayField::Completion) && row.completion_tokens > 0 {
+        let mut label = format!("出 {}", fmt::tokens_compact(row.completion_tokens));
+        if row.reasoning_tokens > 0 {
+            label.push_str(&format!(" 思 {}", fmt::tokens_compact(row.reasoning_tokens)));
+        }
+        place_cell(p, fonts, &label, theme::TEXT_DIM, y, x, limit, line_h, gap);
+    }
+}
+
+/// `api · ::1`: the entry point and the client address, each shown on its own
+/// when the other is missing.
+#[allow(clippy::too_many_arguments)]
+fn draw_source(
+    p: &Painter,
+    fonts: &theme::Fonts,
+    row: &Row,
+    v: &ListView,
+    y: f32,
+    x: &mut f32,
+    limit: f32,
+    line_h: f32,
+    gap: f32,
+) {
+    if !v.shows(DisplayField::Source) {
+        return;
+    }
+    let label = match (&row.source, &row.client_ip) {
+        (Some(source), Some(ip)) => format!("{source} · {ip}"),
+        (Some(source), None) => source.clone(),
+        (None, Some(ip)) => ip.clone(),
+        (None, None) => return,
+    };
+    place_cell(p, fonts, &label, theme::TEXT_FAINT, y, x, limit, line_h, gap);
+}
+
+/// Draw `label` at `x` when it still fits before `limit`, then advance `x`.
+#[allow(clippy::too_many_arguments)]
+fn place_cell(
+    p: &Painter,
+    fonts: &theme::Fonts,
+    label: &str,
+    color: u32,
+    y: f32,
+    x: &mut f32,
+    limit: f32,
+    line_h: f32,
+    gap: f32,
+) {
+    let w = p.dual_measure(&fonts.small, label);
+    if *x + w >= limit {
+        return;
+    }
+    p.dual_text(
+        &fonts.small,
+        label,
+        *x,
+        y,
+        w,
+        line_h,
+        color,
+        theme::ALIGN_NEAR,
+    );
+    *x += w + gap;
 }
 
 /// The header chip for `f`, laid out exactly as `draw_header` draws them.

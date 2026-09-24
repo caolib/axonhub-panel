@@ -17,6 +17,33 @@ pub fn tokens_compact(n: i64) -> String {
 
 pub const DASH: &str = "—";
 
+/// Billed cost, e.g. `$0.1388`. Amounts under a dollar keep four places: two
+/// would turn `$0.1388` and `$0.1289` into the same `$0.14` / `$0.13`.
+pub fn cost(value: f64) -> String {
+    if value >= 1.0 {
+        format!("${value:.2}")
+    } else {
+        format!("${value:.4}")
+    }
+}
+
+/// `[789.2s/456.5s]`: total latency, then time to first token. One decimal
+/// always. A missing side is left out, so a request that failed before the
+/// first token reads `[4.5s]`.
+pub fn latency(total_ms: Option<i64>, first_ms: Option<i64>) -> Option<String> {
+    let total = total_ms.filter(|ms| *ms > 0).map(seconds);
+    let first = first_ms.filter(|ms| *ms > 0).map(seconds);
+    match (total, first) {
+        (Some(total), Some(first)) => Some(format!("[{total}/{first}]")),
+        (Some(only), None) | (None, Some(only)) => Some(format!("[{only}]")),
+        (None, None) => None,
+    }
+}
+
+fn seconds(ms: i64) -> String {
+    format!("{:.1}s", ms as f64 / 1000.0)
+}
+
 /// Relative age such as `30s` / `2m` / `1h` / `3d`, falling back to an
 /// absolute clock reading beyond a week.
 ///

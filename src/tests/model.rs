@@ -23,11 +23,14 @@ fn row_with(requested: &str, served: Option<&str>) -> Row {
         account_id: String::new(),
         account_name: String::new(),
         created_at: None,
+        updated_at: None,
         status: Status::Completed,
         model: requested.to_string(),
         routed_model: served.map(str::to_string),
         channel: None,
         caller: None,
+        source: None,
+        client_ip: None,
         format: None,
         reasoning_effort: None,
         upstream_format: None,
@@ -35,9 +38,14 @@ fn row_with(requested: &str, served: Option<&str>) -> Row {
         stream: false,
         latency_ms: None,
         first_token_ms: None,
+        reasoning_ms: None,
         prompt_tokens: 0,
+        completion_tokens: 0,
+        reasoning_tokens: 0,
         total_tokens: 0,
         cached_tokens: 0,
+        write_cached_tokens: 0,
+        total_cost: None,
         attempt_count: 0,
         failed_attempts: 0,
         attempts_truncated: false,
@@ -68,6 +76,48 @@ fn protocol_never_claims_a_match_when_one_side_is_unknown() {
 
     let b = row_with("m", None);
     assert_eq!(b.protocol(), Protocol::Unknown);
+}
+
+#[test]
+fn usage_and_caller_follow_the_requests_page() {
+    let req = wire_request(
+        r#"{
+          "id": "gid://axonhub/Request/50944",
+          "createdAt": "2026-09-23T11:59:59.0343735Z",
+          "updatedAt": "2026-09-23T12:00:57.8669073Z",
+          "status": "completed",
+          "modelID": "gpt-6-astra",
+          "source": "api",
+          "clientIP": "::1",
+          "metricsLatencyMs": 58749,
+          "metricsFirstTokenLatencyMs": 56870,
+          "metricsReasoningDurationMs": 1200,
+          "apiKey": { "name": "cc", "user": { "firstName": "caolib", "lastName": "cao" } },
+          "usageLogs": { "edges": [ { "node": {
+            "promptTokens": 266568,
+            "completionTokens": 1138,
+            "completionReasoningTokens": 1025,
+            "totalTokens": 267706,
+            "promptCachedTokens": 264519,
+            "promptWriteCachedTokens": 2046,
+            "totalCost": 0.1388096
+          } } ] }
+        }"#,
+    );
+    let row = Row::from_wire(&req);
+    assert_eq!(row.caller.as_deref(), Some("cc"));
+    assert_eq!(row.source.as_deref(), Some("api"));
+    assert_eq!(row.client_ip.as_deref(), Some("::1"));
+    assert_eq!(row.latency_ms, Some(58_749));
+    assert_eq!(row.first_token_ms, Some(56_870));
+    assert_eq!(row.reasoning_ms, Some(1_200));
+    assert_eq!(row.prompt_tokens, 266_568);
+    assert_eq!(row.completion_tokens, 1_138);
+    assert_eq!(row.reasoning_tokens, 1_025);
+    assert_eq!(row.total_tokens, 267_706);
+    assert_eq!(row.cached_tokens, 264_519);
+    assert_eq!(row.write_cached_tokens, 2_046);
+    assert_eq!(row.total_cost, Some(0.1388096));
 }
 
 #[test]

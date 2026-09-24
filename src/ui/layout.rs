@@ -8,7 +8,8 @@
 //! text and the boxes holding it stay in proportion on a scaled monitor.
 
 pub const PAD: f32 = 8.0;
-pub const CARD_H: f32 = 44.0;
+/// Three content lines: marks, model, then the usage metrics.
+pub const CARD_H: f32 = 68.0;
 /// Card height in the single-line layout: one body line with the model chip
 /// centred in it.
 pub const CARD_H_SINGLE: f32 = 26.0;
