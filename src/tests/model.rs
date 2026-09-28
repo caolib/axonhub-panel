@@ -149,6 +149,66 @@ fn reports_the_requested_model_when_not_routed() {
     assert!(!plain.is_routed());
 }
 
+#[test]
+fn strips_the_vendor_prefix_from_model_names() {
+    assert_eq!(short_model_name("zhipu/glm-5.2"), "glm-5.2");
+    assert_eq!(short_model_name("a/b/c"), "c");
+    assert_eq!(short_model_name("glm-5.2"), "glm-5.2");
+    assert_eq!(short_model_name(""), "");
+
+    let routed = row_with("req", Some("vendor/served-model"));
+    assert_eq!(routed.served_model(), "served-model");
+    let plain = row_with("vendor/requested-model", None);
+    assert_eq!(plain.served_model(), "requested-model");
+}
+
+#[test]
+fn model_aliases_replace_the_matching_prefix() {
+    use crate::config::ModelAlias;
+    let alias = |from: &str, to: &str| ModelAlias {
+        from: from.into(),
+        to: to.into(),
+    };
+    let deepseek = vec![alias("deepseek", "ds")];
+
+    // The case from the settings hint: the prefix matches case-insensitively
+    // and only the matched part is replaced.
+    assert_eq!(
+        display_model_name("deepseek-v4.1-flash", &deepseek),
+        "ds-v4.1-flash"
+    );
+    assert_eq!(
+        display_model_name("DeepSeek-V4.1-Flash", &deepseek),
+        "ds-V4.1-Flash"
+    );
+    // The vendor prefix is stripped first, so the alias matches the short name.
+    assert_eq!(
+        display_model_name("vendor/deepseek-chat", &deepseek),
+        "ds-chat"
+    );
+    // A model that matches nothing passes through unchanged.
+    assert_eq!(display_model_name("glm-5.2", &deepseek), "glm-5.2");
+    // An empty alias list is the same as none.
+    assert_eq!(display_model_name("deepseek-v4", &[]), "deepseek-v4");
+
+    // The first entry whose prefix matches wins, so overlapping rules are
+    // resolved by order.
+    let many = vec![alias("deepseek", "ds"), alias("deepseek-r1", "r1")];
+    assert_eq!(display_model_name("deepseek-r1-0528", &many), "ds-r1-0528");
+    assert_eq!(display_model_name("deepseek-chat", &many), "ds-chat");
+
+    // Blank or whitespace-only sides never match, and a re-added `from`
+    // replaces the short form in place.
+    let mut config = crate::config::Config::default();
+    config.upsert_model_alias("deepseek", "ds");
+    config.upsert_model_alias("DeepSeek", "DS");
+    assert_eq!(config.model_aliases.len(), 1);
+    assert_eq!(config.model_aliases[0].to, "DS");
+    config.remove_model_alias(0);
+    config.remove_model_alias(5);
+    assert!(config.model_aliases.is_empty());
+}
+
 fn wire_request(json: &str) -> Request {
     serde_json::from_str(json).expect("request parses")
 }

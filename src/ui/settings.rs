@@ -24,6 +24,7 @@ pub enum Tab {
     Fonts,
     Accounts,
     Channels,
+    Models,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,6 +56,14 @@ pub enum Action {
     ClearCredentials,
     Channel(HiddenChannel),
     ClearChannels,
+    /// The model-alias form: the prefix cell, covered by a native edit box.
+    AliasFromInput,
+    /// The short form cell, also a native edit box.
+    AliasToInput,
+    /// Take both boxes' text and add (or update) the mapping.
+    AddAlias,
+    /// Drop the mapping at this index.
+    RemoveAlias(usize),
     Refresh,
     OpenRequests,
     Quit,
@@ -139,13 +148,14 @@ impl Layout {
             },
             font_header: None,
         };
-        let tab_w = (width - 56.0) / 5.0;
+        let tab_w = (width - 56.0) / 6.0;
         for (i, (tab, label)) in [
             (Tab::Display, "显示与窗口".to_string()),
             (Tab::Fields, "属性显示".to_string()),
             (Tab::Fonts, "字体".to_string()),
             (Tab::Accounts, format!("账号 · {}", app.accounts.len())),
             (Tab::Channels, "渠道过滤".to_string()),
+            (Tab::Models, "模型映射".to_string()),
         ]
         .into_iter()
         .enumerate()
@@ -170,6 +180,7 @@ impl Layout {
             Tab::Fonts => l.fonts(app, state),
             Tab::Accounts => l.accounts(app),
             Tab::Channels => l.channels(app),
+            Tab::Models => l.models(app),
         }
         let y = height - 40.0;
         if state.pending.is_some() {
@@ -768,6 +779,88 @@ impl Layout {
         self.content_height = (y + 16.0).max(160.0);
     }
 
+    /// The model-name abbreviation tab: a two-box form plus the saved list.
+    /// The boxes are native edit controls placed by `sync_edit_boxes`, the
+    /// same way the font-size and opacity fields work.
+    fn models(&mut self, app: &App) {
+        let aliases = &app.config.model_aliases;
+        self.label(0.0, format!("模型名映射 · 当前 {} 条", aliases.len()), true);
+        self.label(
+            26.0,
+            "模型名开头匹配(不区分大小写)后替换，如 deepseek → ds",
+            false,
+        );
+        // The two native edit cells; the controls only carry geometry so
+        // painting and Tab order agree.
+        self.controls.push(Control {
+            rect: Rect {
+                x: 24.0,
+                y: 62.0,
+                w: 170.0,
+                h: 30.0,
+            },
+            label: String::new(),
+            action: Action::AliasFromInput,
+            selected: false,
+            danger: false,
+            body: true,
+            check: false,
+        });
+        self.controls.push(Control {
+            rect: Rect {
+                x: 202.0,
+                y: 62.0,
+                w: 130.0,
+                h: 30.0,
+            },
+            label: String::new(),
+            action: Action::AliasToInput,
+            selected: false,
+            danger: false,
+            body: true,
+            check: false,
+        });
+        self.button(
+            Rect {
+                x: self.width - 114.0,
+                y: 62.0,
+                w: 90.0,
+                h: 30.0,
+            },
+            "添加",
+            Action::AddAlias,
+            false,
+            false,
+            true,
+        );
+        let mut y = 108.0;
+        if aliases.is_empty() {
+            self.label(y, "暂无映射，输入后点「添加」；重复添加会更新简写", false);
+            y += 38.0;
+        }
+        for (index, alias) in aliases.iter().enumerate() {
+            self.label(y + 5.0, format!("{} → {}", alias.from, alias.to), false);
+            if let Some(label) = self.labels.last_mut() {
+                label.rect.w -= 110.0;
+            }
+            self.button(
+                Rect {
+                    x: self.width - 94.0,
+                    y,
+                    w: 70.0,
+                    h: 28.0,
+                },
+                "删除",
+                Action::RemoveAlias(index),
+                false,
+                true,
+                true,
+            );
+            y += 38.0;
+        }
+        self.content_height = (y + 12.0).max(160.0);
+    }
+
     pub fn view_height(&self) -> f32 {
         (self.height - self.content_top - FOOTER).max(0.0)
     }
@@ -975,10 +1068,14 @@ impl Layout {
             }
             for c in self.controls.iter().filter(|c| c.body == body) {
                 // Native edit boxes paint themselves over these cells.
-                if c.action == Action::FontSearch
-                    || c.action == Action::FontSizeInput
-                    || c.action == Action::OpacityInput
-                {
+                if matches!(
+                    c.action,
+                    Action::FontSearch
+                        | Action::FontSizeInput
+                        | Action::OpacityInput
+                        | Action::AliasFromInput
+                        | Action::AliasToInput
+                ) {
                     continue;
                 }
                 let r = self.screen_rect(c, state.scroll);

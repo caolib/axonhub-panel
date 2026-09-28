@@ -11,8 +11,9 @@
 
 use windows::Win32::Graphics::GdiPlus::RectF;
 
+use crate::config::ModelAlias;
 use crate::format as fmt;
-use crate::model::{ExecutionDetail, Protocol, Row};
+use crate::model::{ExecutionDetail, Protocol, Row, display_model_name};
 use crate::theme::{self, Fonts, Painter};
 use crate::ui::layout::Rect;
 
@@ -222,7 +223,13 @@ impl Doc {
     /// recorded, or the request failed before an attempt — or hold several:
     /// AxonHub retries the next channel, and the reason for each attempt is the
     /// point of this view.
-    pub fn build(row: &Row, executions: &[ExecutionDetail], now: i64, depth: Depth) -> Doc {
+    pub fn build(
+        row: &Row,
+        executions: &[ExecutionDetail],
+        now: i64,
+        depth: Depth,
+        aliases: &[ModelAlias],
+    ) -> Doc {
         let mut lines = Vec::new();
         if depth == Depth::Full {
             lines.push(Line::Section("请求".into(), theme::TEXT_DIM));
@@ -284,7 +291,7 @@ impl Doc {
             ));
         }
         for (index, execution) in executions.iter().enumerate() {
-            push_execution(&mut lines, index, execution, depth);
+            push_execution(&mut lines, index, execution, depth, aliases);
         }
         Doc { lines }
     }
@@ -298,7 +305,13 @@ fn field(label: &'static str, value: impl Into<String>, color: u32) -> Line {
     }
 }
 
-fn push_execution(lines: &mut Vec<Line>, index: usize, ex: &ExecutionDetail, depth: Depth) {
+fn push_execution(
+    lines: &mut Vec<Line>,
+    index: usize,
+    ex: &ExecutionDetail,
+    depth: Depth,
+    aliases: &[ModelAlias],
+) {
     let status = ex.status();
     let mut title = format!("执行 {} · {}", index + 1, status.label());
     // The compact view keeps the code for its own row, so the heading names the
@@ -334,6 +347,7 @@ fn push_execution(lines: &mut Vec<Line>, index: usize, ex: &ExecutionDetail, dep
     if depth == Depth::Compact {
         lines.push(field("状态码", status_code_text(ex), status_code_color(ex)));
         if let Some(model) = non_empty(&ex.model_id) {
+            let model = display_model_name(&model, aliases);
             lines.push(field("模型", with_effort(model, ex), theme::TEXT));
         }
         if let Some(message) = non_empty(&ex.error_message) {
@@ -344,6 +358,7 @@ fn push_execution(lines: &mut Vec<Line>, index: usize, ex: &ExecutionDetail, dep
     }
 
     if let Some(model) = non_empty(&ex.model_id) {
+        let model = display_model_name(&model, aliases);
         lines.push(field("模型", with_effort(model, ex), theme::TEXT));
     }
     if let Some(span) = span_text(ex.created_at.as_deref(), ex.updated_at.as_deref()) {
@@ -446,10 +461,16 @@ fn tokens_text(row: &Row) -> String {
         fmt::tokens_compact(row.prompt_tokens)
     );
     if row.completion_tokens > 0 {
-        text.push_str(&format!(" · 出 {}", fmt::tokens_compact(row.completion_tokens)));
+        text.push_str(&format!(
+            " · 出 {}",
+            fmt::tokens_compact(row.completion_tokens)
+        ));
     }
     if row.reasoning_tokens > 0 {
-        text.push_str(&format!(" · 思考 {}", fmt::tokens_compact(row.reasoning_tokens)));
+        text.push_str(&format!(
+            " · 思考 {}",
+            fmt::tokens_compact(row.reasoning_tokens)
+        ));
     }
     if let Some(rate) = row.cache_hit_rate() {
         text.push_str(&format!(" · 缓存 {rate:.1}%"));
@@ -475,11 +496,11 @@ fn origin_text(row: &Row) -> Option<String> {
 
 fn timing_text(row: &Row) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(ms) = row.latency_ms {
-        parts.push(format!("总 {:.1}s", ms as f64 / 1000.0));
-    }
     if let Some(ms) = row.first_token_ms {
         parts.push(format!("首字 {:.1}s", ms as f64 / 1000.0));
+    }
+    if let Some(ms) = row.latency_ms {
+        parts.push(format!("总 {:.1}s", ms as f64 / 1000.0));
     }
     if let Some(ms) = row.reasoning_ms {
         parts.push(format!("推理 {:.1}s", ms as f64 / 1000.0));

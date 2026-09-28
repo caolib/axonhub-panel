@@ -129,3 +129,28 @@ fn hiding_a_channel_only_drops_that_accounts_rows() {
         channel: "relay".into(),
     }));
 }
+
+#[test]
+fn model_abbreviations_apply_on_rebuild_and_survive_it() {
+    let mut app = App::new(Config::default());
+    let mut routed = row(Status::Completed);
+    routed.model = "deepseek-v4.1-flash".into();
+    routed.routed_model = Some("DeepSeek-R1".into());
+    app.axon_rows = vec![routed];
+    app.axon_total = 1;
+    app.config.upsert_model_alias("deepseek", "ds");
+    app.rebuild();
+
+    // Both the requested and the served model carry the abbreviation, and
+    // the routed marker survives the rewrite.
+    assert_eq!(app.rows[0].model, "ds-v4.1-flash");
+    assert_eq!(app.rows[0].routed_model.as_deref(), Some("ds-R1"));
+    assert!(app.rows[0].is_routed());
+
+    // The worker's copy is untouched, so removing the alias restores the
+    // original names on the next rebuild.
+    app.config.remove_model_alias(0);
+    app.rebuild();
+    assert_eq!(app.rows[0].model, "deepseek-v4.1-flash");
+    assert_eq!(app.rows[0].routed_model.as_deref(), Some("DeepSeek-R1"));
+}

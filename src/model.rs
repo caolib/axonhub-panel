@@ -10,6 +10,44 @@
 
 use serde::Deserialize;
 
+/// Strips the vendor prefix from a model id: `openai/gpt-4o` -> `gpt-4o`.
+/// The part before the slash is the provider name, which the panel does not
+/// show; ids without a slash pass through unchanged.
+pub fn short_model_name(model: &str) -> &str {
+    match model.rsplit_once('/') {
+        Some((_, name)) => name,
+        None => model,
+    }
+}
+
+/// The model name the panel displays: the vendor prefix is stripped, then the
+/// user's abbreviations (`config.modelAliases`) are applied — the first entry
+/// whose `from` is a case-insensitive prefix of the short name replaces that
+/// prefix with its `to`. So `deepseek -> ds` turns `DeepSeek-V4.1-Flash` into
+/// `ds-V4.1-Flash`. Nothing matches, the short name passes through.
+pub fn display_model_name(raw: &str, aliases: &[crate::config::ModelAlias]) -> String {
+    let short = short_model_name(raw);
+    if aliases.is_empty() || short.is_empty() {
+        return short.to_string();
+    }
+    let lower = short.to_lowercase();
+    for alias in aliases {
+        let from = alias.from.trim();
+        let to = alias.to.trim();
+        if from.is_empty() || to.is_empty() {
+            continue;
+        }
+        // `get` guards the byte offsets: a multi-byte lowercasing edge case
+        // makes the slice fail and the entry be skipped, never panic.
+        if lower.starts_with(&from.to_lowercase())
+            && let Some(rest) = short.get(from.len()..)
+        {
+            return format!("{to}{rest}");
+        }
+    }
+    short.to_string()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Edge<T> {
     pub node: Option<T>,
@@ -433,9 +471,9 @@ impl Row {
     /// card shows; the caller marks it with `is_routed()`.
     pub fn served_model(&self) -> &str {
         match &self.routed_model {
-            Some(routed) => routed,
+            Some(routed) => short_model_name(routed),
             None if self.model.is_empty() => "未知模型",
-            None => &self.model,
+            None => short_model_name(&self.model),
         }
     }
 

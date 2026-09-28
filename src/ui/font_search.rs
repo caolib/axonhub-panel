@@ -22,9 +22,18 @@ pub const SIZE_ID: usize = 2101;
 /// The opacity box. A control id of its own keeps its notifications from
 /// being read as search input.
 pub const OPACITY_ID: usize = 2102;
+/// The model-alias form: the prefix to match, then its short form. Both are
+/// free text, so they must not be read as the numeric boxes above.
+pub const ALIAS_FROM_ID: usize = 2103;
+pub const ALIAS_TO_ID: usize = 2104;
 pub const WM_SEARCH_FOCUS: u32 = WM_APP + 42;
 const EM_LIMITTEXT: u32 = 0x00C5;
 const EM_SETSEL: u32 = 0x00B1;
+
+/// The only boxes that restrict typing to digits; every other id is free text.
+fn numeric_id(id: usize) -> bool {
+    matches!(id, SIZE_ID | OPACITY_ID)
+}
 
 pub struct SearchBox {
     pub hwnd: HWND,
@@ -54,11 +63,11 @@ pub fn font(scale: f32) -> HFONT {
 }
 
 impl SearchBox {
-    /// `id` selects the control: `ID` is free text, `SIZE_ID`/`OPACITY_ID`
-    /// restrict typed characters to digits and a decimal point. Text set
-    /// programmatically (or pasted) is taken as-is.
+    /// `id` selects the control: `SIZE_ID`/`OPACITY_ID` restrict typed
+    /// characters to digits and a decimal point, the rest are free text. Text
+    /// set programmatically (or pasted) is taken as-is.
     pub fn new(parent: HWND, scale: f32, text: &str, id: usize) -> Option<Self> {
-        let numeric = id != ID;
+        let numeric = numeric_id(id);
         let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let hwnd = unsafe {
             CreateWindowExW(
@@ -180,7 +189,7 @@ unsafe extern "system" fn edit_proc(
             }
         }
         WM_CHAR if [9, 13, 27].contains(&wp.0) => return LRESULT(0),
-        WM_CHAR if id != ID && !numeric_char(wp.0) => return LRESULT(0),
+        WM_CHAR if numeric_id(id) && !numeric_char(wp.0) => return LRESULT(0),
         WM_MOUSEWHEEL => return unsafe { SendMessageW(parent, msg, Some(wp), Some(lp)) },
         WM_NCDESTROY => unsafe {
             let _ = RemoveWindowSubclass(hwnd, Some(edit_proc), id);

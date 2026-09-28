@@ -289,6 +289,22 @@ impl App {
     /// applied here: the worker sends them as `statusIn`.
     pub fn rebuild(&mut self) {
         let mut rows = self.axon_rows.clone();
+        // The rows from the worker keep the wire model ids; the display list is
+        // the one place abbreviations are applied, so the panel and the detail
+        // popup (both read from here) show the same short names. Re-applied on
+        // every rebuild, which is what makes a settings change take effect at
+        // once.
+        if !self.config.model_aliases.is_empty() {
+            for row in &mut rows {
+                row.model = model::display_model_name(&row.model, &self.config.model_aliases);
+                if let Some(routed) = row.routed_model.as_deref().map(str::to_string) {
+                    row.routed_model = Some(model::display_model_name(
+                        &routed,
+                        &self.config.model_aliases,
+                    ));
+                }
+            }
+        }
         rows.sort_by_key(|row| std::cmp::Reverse(row.age_key()));
         // A looked-up request is shown on its own, past the hidden-channel
         // list: that filter is what the lookup is for.

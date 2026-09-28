@@ -104,7 +104,7 @@ fn parses_the_executions_query_answer() {
 
 #[test]
 fn the_full_document_carries_every_channel_code_and_error() {
-    let doc = Doc::build(&row(), &executions(), 1_789_179_657, Depth::Full);
+    let doc = Doc::build(&row(), &executions(), 1_789_179_657, Depth::Full, &[]);
     let text = plain_text(&doc);
 
     assert!(text.contains("调用者: cc"), "{text}");
@@ -140,7 +140,7 @@ fn the_full_document_carries_every_channel_code_and_error() {
 
 #[test]
 fn the_compact_document_keeps_the_channel_code_model_and_error() {
-    let doc = Doc::build(&row(), &executions(), 1_789_179_657, Depth::Compact);
+    let doc = Doc::build(&row(), &executions(), 1_789_179_657, Depth::Compact, &[]);
     let text = plain_text(&doc);
 
     assert!(text.contains("执行 1 · 已取消"), "{text}");
@@ -179,7 +179,7 @@ fn the_compact_document_keeps_the_channel_code_model_and_error() {
 #[test]
 fn a_request_without_executions_says_so() {
     for depth in [Depth::Compact, Depth::Full] {
-        let doc = Doc::build(&row(), &[], 1_789_179_657, depth);
+        let doc = Doc::build(&row(), &[], 1_789_179_657, depth, &[]);
         let text = plain_text(&doc);
         assert!(text.contains("没有记录到上游执行"), "{depth:?}: {text}");
     }

@@ -34,6 +34,9 @@ pub struct Popup {
     size: Option<SearchBox>,
     /// Panel opacity in percent, typed into a native edit box on the display tab.
     opacity: Option<SearchBox>,
+    /// Model-alias form: the prefix to match and its short form.
+    alias_from: Option<SearchBox>,
+    alias_to: Option<SearchBox>,
 }
 
 /// Restore the panel after editing an account, including a previously open form.
@@ -133,6 +136,8 @@ pub fn open(owner: HWND, point: POINT) {
             search: None,
             size: None,
             opacity: None,
+            alias_from: None,
+            alias_to: None,
         })
     });
     crate::apply_window_chrome(hwnd);
@@ -166,10 +171,10 @@ pub fn reload_fonts() {
     PanelState::with(|s| {
         if let Some(p) = s.settings.as_mut() {
             p.fonts = Fonts::load(
-            p.scale,
-            &s.app.config.font_family,
-            &s.app.config.cjk_font_family,
-        );
+                p.scale,
+                &s.app.config.font_family,
+                &s.app.config.cjk_font_family,
+            );
         }
     });
     redraw();
@@ -195,6 +200,8 @@ fn sync_edit_boxes(hwnd: HWND) {
     let search = layout.edit_box_rect(&Action::FontSearch, scroll);
     let size = layout.edit_box_rect(&Action::FontSizeInput, scroll);
     let opacity = layout.edit_box_rect(&Action::OpacityInput, scroll);
+    let alias_from = layout.edit_box_rect(&Action::AliasFromInput, scroll);
+    let alias_to = layout.edit_box_rect(&Action::AliasToInput, scroll);
     sync_box(hwnd, search, &query, font_search::ID, search_slot);
     sync_box(hwnd, size, &size_text, font_search::SIZE_ID, size_slot);
     sync_box(
@@ -204,6 +211,15 @@ fn sync_edit_boxes(hwnd: HWND) {
         font_search::OPACITY_ID,
         opacity_slot,
     );
+    // Fresh alias boxes start empty; the text lives in the config, not here.
+    sync_box(
+        hwnd,
+        alias_from,
+        "",
+        font_search::ALIAS_FROM_ID,
+        alias_from_slot,
+    );
+    sync_box(hwnd, alias_to, "", font_search::ALIAS_TO_ID, alias_to_slot);
 }
 
 fn search_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
@@ -215,6 +231,12 @@ fn opacity_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
 }
 fn size_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
     &mut popup.size
+}
+fn alias_from_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
+    &mut popup.alias_from
+}
+fn alias_to_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
+    &mut popup.alias_to
 }
 
 /// Place one native edit box over its layout cell: create it on first use,
@@ -296,6 +318,8 @@ fn focus_control(hwnd: HWND, select_all: bool) {
         match p.ui.focus {
             Some(Action::FontSearch) => p.search.as_ref().map(|b| b.hwnd),
             Some(Action::OpacityInput) => p.opacity.as_ref().map(|b| b.hwnd),
+            Some(Action::AliasFromInput) => p.alias_from.as_ref().map(|b| b.hwnd),
+            Some(Action::AliasToInput) => p.alias_to.as_ref().map(|b| b.hwnd),
             _ => None,
         }
     })
@@ -364,6 +388,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                         p.ui.focus = Some(Action::FontSizeInput);
                     } else if p.opacity.as_ref().is_some_and(|b| b.hwnd == focused) {
                         p.ui.focus = Some(Action::OpacityInput);
+                    } else if p.alias_from.as_ref().is_some_and(|b| b.hwnd == focused) {
+                        p.ui.focus = Some(Action::AliasFromInput);
+                    } else if p.alias_to.as_ref().is_some_and(|b| b.hwnd == focused) {
+                        p.ui.focus = Some(Action::AliasToInput);
                     }
                 }
             });
@@ -372,11 +400,17 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_CTLCOLOREDIT => {
             if let Some(color) = PanelState::with(|s| {
                 let p = s.settings.as_ref()?;
-                [p.search.as_ref(), p.size.as_ref(), p.opacity.as_ref()]
-                    .into_iter()
-                    .flatten()
-                    .find(|b| b.hwnd.0 as isize == lp.0)
-                    .map(|b| b.color_dc(HDC(wp.0 as *mut _)))
+                [
+                    p.search.as_ref(),
+                    p.size.as_ref(),
+                    p.opacity.as_ref(),
+                    p.alias_from.as_ref(),
+                    p.alias_to.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .find(|b| b.hwnd.0 as isize == lp.0)
+                .map(|b| b.color_dc(HDC(wp.0 as *mut _)))
             })
             .flatten()
             {
@@ -649,6 +683,13 @@ fn key(hwnd: HWND, key: u16) {
             dispatch(hwnd, Action::SaveFontSize);
         } else if focused == Some(Action::OpacityInput) && key == VK_RETURN.0 {
             dispatch(hwnd, Action::SaveOpacity);
+        } else if matches!(
+            focused,
+            Some(Action::AliasFromInput) | Some(Action::AliasToInput)
+        ) && key == VK_RETURN.0
+        {
+            // Enter inside either alias box adds the mapping.
+            dispatch(hwnd, Action::AddAlias);
         } else if let Some(action) = focused {
             dispatch(hwnd, action);
         }
@@ -851,6 +892,39 @@ fn dispatch(hwnd: HWND, action: Action) {
                 s.app.scroll = 0.0;
                 s.app.rebuild();
                 s.app.save();
+            });
+        }
+        Action::AliasFromInput | Action::AliasToInput => focus_control(hwnd, true),
+        Action::AddAlias => {
+            let boxes = PanelState::with(|s| {
+                let p = s.settings.as_ref()?;
+                Some((
+                    p.alias_from.as_ref().map(|b| b.hwnd),
+                    p.alias_to.as_ref().map(|b| b.hwnd),
+                ))
+            })
+            .flatten();
+            if let Some((Some(from_box), Some(to_box))) = boxes {
+                let from = font_search::query(from_box).trim().to_string();
+                let to = font_search::query(to_box).trim().to_string();
+                if !from.is_empty() && !to.is_empty() {
+                    PanelState::with(|s| {
+                        s.app.config.upsert_model_alias(&from, &to);
+                        s.app.save();
+                        // Already-visible cards pick up the new names at once.
+                        s.app.rebuild();
+                    });
+                    // A fresh round of input starts from empty boxes.
+                    font_search::set_text(from_box, "");
+                    font_search::set_text(to_box, "");
+                }
+            }
+        }
+        Action::RemoveAlias(index) => {
+            PanelState::with(|s| {
+                s.app.config.remove_model_alias(index);
+                s.app.save();
+                s.app.rebuild();
             });
         }
     }

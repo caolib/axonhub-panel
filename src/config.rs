@@ -88,6 +88,10 @@ pub struct Config {
     pub accounts: Vec<Account>,
     /// (account, channel) pairs whose requests are hidden from the merged list.
     pub hidden_channels: Vec<HiddenChannel>,
+    /// Model-name abbreviations the panel applies before display: a short name
+    /// starting with `from` (case-insensitively) shows `to` in its place. The
+    /// first entry whose prefix matches wins.
+    pub model_aliases: Vec<ModelAlias>,
     /// Card cells the user switched off in the settings window. Empty means
     /// everything is shown, so a cell added in a later version starts visible.
     pub hidden_fields: Vec<DisplayField>,
@@ -151,6 +155,7 @@ impl Default for Config {
             logical_window: true,
             accounts: Vec::new(),
             hidden_channels: Vec::new(),
+            model_aliases: Vec::new(),
             hidden_fields: Vec::new(),
             window: WindowState::default(),
         }
@@ -214,6 +219,16 @@ pub struct Account {
 pub struct HiddenChannel {
     pub account_id: String,
     pub channel: String,
+}
+
+/// One model-name abbreviation, e.g. `deepseek` -> `ds`: a model id whose
+/// short name starts with `from` (compared case-insensitively) is displayed
+/// with that prefix replaced by `to`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ModelAlias {
+    pub from: String,
+    pub to: String,
 }
 
 /// One informational cell a request card can show. Listed in the order the
@@ -523,6 +538,30 @@ impl Config {
                 self.hidden_channels.remove(index);
             }
             None => self.hidden_channels.push(entry),
+        }
+    }
+
+    /// Add a model-name abbreviation, or update the short form of an existing
+    /// `from` (compared case-insensitively) so re-adding one edits in place.
+    pub fn upsert_model_alias(&mut self, from: &str, to: &str) {
+        let key = from.to_lowercase();
+        match self
+            .model_aliases
+            .iter_mut()
+            .find(|a| a.from.to_lowercase() == key)
+        {
+            Some(slot) => slot.to = to.to_string(),
+            None => self.model_aliases.push(ModelAlias {
+                from: from.to_string(),
+                to: to.to_string(),
+            }),
+        }
+    }
+
+    /// Drop the model-name abbreviation at `index`.
+    pub fn remove_model_alias(&mut self, index: usize) {
+        if index < self.model_aliases.len() {
+            self.model_aliases.remove(index);
         }
     }
 

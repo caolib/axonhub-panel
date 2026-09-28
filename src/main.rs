@@ -142,7 +142,11 @@ fn sync_scale(hwnd: HWND) {
         return;
     }
     State::with(|s| {
-        s.fonts = Fonts::load(scale, &s.app.config.font_family, &s.app.config.cjk_font_family);
+        s.fonts = Fonts::load(
+            scale,
+            &s.app.config.font_family,
+            &s.app.config.cjk_font_family,
+        );
         s.scale = scale;
     });
 
@@ -723,7 +727,11 @@ fn main() {
         // monitor the window actually landed on.
         let scale = window_scale(hwnd);
         State::with(|s| {
-            s.fonts = Fonts::load(scale, &s.app.config.font_family, &s.app.config.cjk_font_family);
+            s.fonts = Fonts::load(
+                scale,
+                &s.app.config.font_family,
+                &s.app.config.cjk_font_family,
+            );
             s.scale = scale;
         });
 
@@ -1220,7 +1228,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 1.0
             };
             State::with(|s| {
-                s.fonts = Fonts::load(scale, &s.app.config.font_family, &s.app.config.cjk_font_family);
+                s.fonts = Fonts::load(
+                    scale,
+                    &s.app.config.font_family,
+                    &s.app.config.cjk_font_family,
+                );
                 s.scale = scale;
             });
 
@@ -1651,7 +1663,7 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                         detail::Depth::Compact => detail::Depth::Full,
                         detail::Depth::Full => detail::Depth::Compact,
                     };
-                    rebuild_doc(open);
+                    rebuild_doc(open, &s.app.config.model_aliases);
                     // The two documents have nothing in common position-wise.
                     open.scroll = 0.0;
                     Some((open.hwnd, open.depth))
@@ -1941,17 +1953,16 @@ fn apply_detail(
             open.error = Some(err.message());
         }
     }
-    rebuild_doc(open);
+    rebuild_doc(open, &s.app.config.model_aliases);
     open.scroll = 0.0;
 }
 
 /// Re-render the document for the current depth. Cheap — it is string assembly
 /// — so it runs whenever the attempts arrive or the depth is toggled.
-fn rebuild_doc(open: &mut DetailPopup) {
-    open.doc = open
-        .executions
-        .as_ref()
-        .map(|executions| detail::Doc::build(&open.row, executions, now_unix(), open.depth));
+fn rebuild_doc(open: &mut DetailPopup, aliases: &[config::ModelAlias]) {
+    open.doc = open.executions.as_ref().map(|executions| {
+        detail::Doc::build(&open.row, executions, now_unix(), open.depth, aliases)
+    });
 }
 
 /// The window must accept focus while the sign-in form is up, and while the
