@@ -21,31 +21,56 @@ pub fn short_model_name(model: &str) -> &str {
 }
 
 /// The model name the panel displays: the vendor prefix is stripped, then the
-/// user's abbreviations (`config.modelAliases`) are applied — the first entry
-/// whose `from` is a case-insensitive prefix of the short name replaces that
-/// prefix with its `to`. So `deepseek -> ds` turns `DeepSeek-V4.1-Flash` into
-/// `ds-V4.1-Flash`. Nothing matches, the short name passes through.
+/// user's abbreviations (`config.modelAliases`) are applied in order — every
+/// occurrence of an entry's `from` (compared case-insensitively) is replaced
+/// with its `to`, each rule working on the result of the previous one. So
+/// `deepseek` -> `ds` plus `flash` -> `f` turns `deepseek-v4.1-flash` into
+/// `ds-v4.1-f`. An empty `to` deletes the matches, so `deepseek-` -> `` turns
+/// `deepseek-v4.1-flash` into `v4.1-flash`.
 pub fn display_model_name(raw: &str, aliases: &[crate::config::ModelAlias]) -> String {
-    let short = short_model_name(raw);
-    if aliases.is_empty() || short.is_empty() {
-        return short.to_string();
+    let mut current = short_model_name(raw).to_string();
+    if aliases.is_empty() || current.is_empty() {
+        return current;
     }
-    let lower = short.to_lowercase();
     for alias in aliases {
         let from = alias.from.trim();
-        let to = alias.to.trim();
-        if from.is_empty() || to.is_empty() {
+        // `to` may be empty: it deletes the matches rather than replacing
+        // them. A blank `from` would match everywhere, so it is skipped.
+        if from.is_empty() {
             continue;
         }
-        // `get` guards the byte offsets: a multi-byte lowercasing edge case
-        // makes the slice fail and the entry be skipped, never panic.
-        if lower.starts_with(&from.to_lowercase())
-            && let Some(rest) = short.get(from.len()..)
+        current = replace_all_ci(&current, from, alias.to.trim());
+    }
+    current
+}
+
+/// Case-insensitive `from` -> `to` over every occurrence, without regex.
+///
+/// Matching walks bytes and compares with `eq_ignore_ascii_case`, which is
+/// safe on UTF-8: a needle starts with an ASCII byte or a UTF-8 lead byte,
+/// and both only occur at character boundaries, so a match can never begin
+/// (or end) inside a multi-byte character. Non-ASCII text simply compares
+/// byte-for-byte. A needle the haystack does not hold returns it unchanged.
+fn replace_all_ci(haystack: &str, from: &str, to: &str) -> String {
+    let needle = from.as_bytes();
+    if needle.is_empty() {
+        return haystack.to_string();
+    }
+    let bytes = haystack.as_bytes();
+    let mut out = Vec::with_capacity(haystack.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + needle.len() <= bytes.len()
+            && bytes[i..i + needle.len()].eq_ignore_ascii_case(needle)
         {
-            return format!("{to}{rest}");
+            out.extend_from_slice(to.as_bytes());
+            i += needle.len();
+        } else {
+            out.push(bytes[i]);
+            i += 1;
         }
     }
-    short.to_string()
+    String::from_utf8(out).unwrap_or_else(|_| haystack.to_string())
 }
 
 #[derive(Debug, Clone, Deserialize)]

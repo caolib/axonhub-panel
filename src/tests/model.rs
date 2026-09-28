@@ -163,7 +163,7 @@ fn strips_the_vendor_prefix_from_model_names() {
 }
 
 #[test]
-fn model_aliases_replace_the_matching_prefix() {
+fn model_aliases_rewrite_every_match_in_order() {
     use crate::config::ModelAlias;
     let alias = |from: &str, to: &str| ModelAlias {
         from: from.into(),
@@ -171,8 +171,8 @@ fn model_aliases_replace_the_matching_prefix() {
     };
     let deepseek = vec![alias("deepseek", "ds")];
 
-    // The case from the settings hint: the prefix matches case-insensitively
-    // and only the matched part is replaced.
+    // The case from the settings hint: matches are replaced
+    // case-insensitively, the rest of the name keeps its own case.
     assert_eq!(
         display_model_name("deepseek-v4.1-flash", &deepseek),
         "ds-v4.1-flash"
@@ -191,8 +191,28 @@ fn model_aliases_replace_the_matching_prefix() {
     // An empty alias list is the same as none.
     assert_eq!(display_model_name("deepseek-v4", &[]), "deepseek-v4");
 
-    // The first entry whose prefix matches wins, so overlapping rules are
-    // resolved by order.
+    // An empty short form deletes the matches instead of replacing them.
+    let strip = vec![alias("deepseek-", "")];
+    assert_eq!(
+        display_model_name("deepseek-v4.1-flash", &strip),
+        "v4.1-flash"
+    );
+    assert_eq!(display_model_name("DeepSeek-X", &strip), "X");
+
+    // Rules chain: each one rewrites every occurrence (anywhere in the name,
+    // not just the head) in the result of the previous one.
+    let chained = vec![alias("deepseek", "ds"), alias("flash", "f")];
+    assert_eq!(
+        display_model_name("deepseek-v4.1-flash", &chained),
+        "ds-v4.1-f"
+    );
+    assert_eq!(
+        display_model_name("DeepSeek-V4.1-Flash", &chained),
+        "ds-V4.1-f"
+    );
+
+    // Overlapping rules resolve by order: an earlier rewrite can hide a
+    // later rule's match.
     let many = vec![alias("deepseek", "ds"), alias("deepseek-r1", "r1")];
     assert_eq!(display_model_name("deepseek-r1-0528", &many), "ds-r1-0528");
     assert_eq!(display_model_name("deepseek-chat", &many), "ds-chat");

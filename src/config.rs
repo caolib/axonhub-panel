@@ -88,9 +88,11 @@ pub struct Config {
     pub accounts: Vec<Account>,
     /// (account, channel) pairs whose requests are hidden from the merged list.
     pub hidden_channels: Vec<HiddenChannel>,
-    /// Model-name abbreviations the panel applies before display: a short name
-    /// starting with `from` (case-insensitively) shows `to` in its place. The
-    /// first entry whose prefix matches wins.
+    /// Model-name abbreviations the panel applies before display: every
+    /// occurrence of `from` in the short model name (compared
+    /// case-insensitively) is replaced with `to`, in list order, each rule
+    /// working on the result of the previous one. An empty `to` deletes the
+    /// matches.
     pub model_aliases: Vec<ModelAlias>,
     /// Card cells the user switched off in the settings window. Empty means
     /// everything is shown, so a cell added in a later version starts visible.
@@ -221,9 +223,9 @@ pub struct HiddenChannel {
     pub channel: String,
 }
 
-/// One model-name abbreviation, e.g. `deepseek` -> `ds`: a model id whose
-/// short name starts with `from` (compared case-insensitively) is displayed
-/// with that prefix replaced by `to`.
+/// One model-name abbreviation, e.g. `deepseek` -> `ds`: every occurrence of
+/// `from` in the displayed model name (compared case-insensitively) is
+/// replaced with `to`. An empty `to` deletes the matches.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ModelAlias {

@@ -906,8 +906,10 @@ fn dispatch(hwnd: HWND, action: Action) {
             .flatten();
             if let Some((Some(from_box), Some(to_box))) = boxes {
                 let from = font_search::query(from_box).trim().to_string();
+                // An empty short form is allowed: it deletes the matched
+                // prefix instead of replacing it.
                 let to = font_search::query(to_box).trim().to_string();
-                if !from.is_empty() && !to.is_empty() {
+                if !from.is_empty() {
                     PanelState::with(|s| {
                         s.app.config.upsert_model_alias(&from, &to);
                         s.app.save();

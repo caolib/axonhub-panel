@@ -787,7 +787,7 @@ impl Layout {
         self.label(0.0, format!("模型名映射 · 当前 {} 条", aliases.len()), true);
         self.label(
             26.0,
-            "模型名开头匹配(不区分大小写)后替换，如 deepseek → ds",
+            "模型名中的匹配(不区分大小写)逐条全部替换，如 deepseek → ds、flash → f",
             false,
         );
         // The two native edit cells; the controls only carry geometry so
@@ -839,7 +839,12 @@ impl Layout {
             y += 38.0;
         }
         for (index, alias) in aliases.iter().enumerate() {
-            self.label(y + 5.0, format!("{} → {}", alias.from, alias.to), false);
+            let to = if alias.to.is_empty() {
+                "空"
+            } else {
+                alias.to.as_str()
+            };
+            self.label(y + 5.0, format!("{} → {}", alias.from, to), false);
             if let Some(label) = self.labels.last_mut() {
                 label.rect.w -= 110.0;
             }
