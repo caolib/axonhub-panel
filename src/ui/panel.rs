@@ -895,7 +895,7 @@ fn draw_card(
     let line3_limit = rect.x + rect.w - c.inner_pad;
     let mut x = text_x;
     let gap = 6.0 * m.scale;
-    draw_usage_line(p, fonts, row, v, y, &mut x, line3_limit, c.line2, gap);
+    draw_usage_line(p, fonts, row, v, y, &mut x, line3_limit, c.line2, gap, true);
 }
 
 /// Compact card: every field on a single line, with the model chip as the only
@@ -947,7 +947,27 @@ fn draw_card_single(
         right = time_x - 8.0 * s;
     }
 
-    // Account tag, immediately left of the time; only when more than one
+    // Cost, immediately left of the time so the two read as one pair.
+    if v.shows(DisplayField::Cost)
+        && let Some(value) = row.total_cost
+    {
+        let text = fmt::cost(value);
+        let cost_w = p.dual_measure(&fonts.body, &text) + 4.0;
+        let cost_x = right - cost_w;
+        p.dual_text(
+            &fonts.body,
+            &text,
+            cost_x,
+            body_y,
+            cost_w,
+            c.line1,
+            theme::YELLOW,
+            theme::ALIGN_FAR,
+        );
+        right = cost_x - 8.0 * s;
+    }
+
+    // Account tag, left of the cost; only when more than one
     // account is merged into this list.
     if v.shows(DisplayField::Account) && v.accounts.len() > 1 && !row.account_name.is_empty() {
         let color = account_color(v.accounts, &row.account_id);
@@ -1203,11 +1223,14 @@ fn draw_card_single(
         }
     }
 
-    draw_usage_line(p, fonts, row, v, small_y, &mut x, limit, c.line2, gap);
+    draw_usage_line(
+        p, fonts, row, v, small_y, &mut x, limit, c.line2, gap, false,
+    );
     draw_source(p, fonts, row, v, small_y, &mut x, limit, c.line2, gap);
 }
 
-/// Cost, latency and completion tokens, drawn left to right until the line runs out.
+/// Latency and completion tokens (plus cost in the multi-line layout), drawn
+/// left to right until the line runs out.
 #[allow(clippy::too_many_arguments)]
 fn draw_usage_line(
     p: &Painter,
@@ -1219,11 +1242,23 @@ fn draw_usage_line(
     limit: f32,
     line_h: f32,
     gap: f32,
+    with_cost: bool,
 ) {
-    if v.shows(DisplayField::Cost)
+    if with_cost
+        && v.shows(DisplayField::Cost)
         && let Some(value) = row.total_cost
     {
-        place_cell(p, fonts, &fmt::cost(value), theme::YELLOW, y, x, limit, line_h, gap);
+        place_cell(
+            p,
+            fonts,
+            &fmt::cost(value),
+            theme::YELLOW,
+            y,
+            x,
+            limit,
+            line_h,
+            gap,
+        );
     }
     if v.shows(DisplayField::Latency)
         && let Some(label) = fmt::latency(row.latency_ms, row.first_token_ms)
@@ -1233,7 +1268,10 @@ fn draw_usage_line(
     if v.shows(DisplayField::Completion) && row.completion_tokens > 0 {
         let mut label = format!("出 {}", fmt::tokens_compact(row.completion_tokens));
         if row.reasoning_tokens > 0 {
-            label.push_str(&format!(" 思 {}", fmt::tokens_compact(row.reasoning_tokens)));
+            label.push_str(&format!(
+                " 思 {}",
+                fmt::tokens_compact(row.reasoning_tokens)
+            ));
         }
         place_cell(p, fonts, &label, theme::TEXT_DIM, y, x, limit, line_h, gap);
     }
@@ -1262,7 +1300,17 @@ fn draw_source(
         (None, Some(ip)) => ip.clone(),
         (None, None) => return,
     };
-    place_cell(p, fonts, &label, theme::TEXT_FAINT, y, x, limit, line_h, gap);
+    place_cell(
+        p,
+        fonts,
+        &label,
+        theme::TEXT_FAINT,
+        y,
+        x,
+        limit,
+        line_h,
+        gap,
+    );
 }
 
 /// Draw `label` at `x` when it still fits before `limit`, then advance `x`.

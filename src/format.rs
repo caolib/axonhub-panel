@@ -27,14 +27,14 @@ pub fn cost(value: f64) -> String {
     }
 }
 
-/// `[789.2s/456.5s]`: total latency, then time to first token. One decimal
+/// `[456.5s·789.2s]`: time to first token, then total latency. One decimal
 /// always. A missing side is left out, so a request that failed before the
 /// first token reads `[4.5s]`.
 pub fn latency(total_ms: Option<i64>, first_ms: Option<i64>) -> Option<String> {
     let total = total_ms.filter(|ms| *ms > 0).map(seconds);
     let first = first_ms.filter(|ms| *ms > 0).map(seconds);
-    match (total, first) {
-        (Some(total), Some(first)) => Some(format!("[{total}/{first}]")),
+    match (first, total) {
+        (Some(first), Some(total)) => Some(format!("[{first}·{total}]")),
         (Some(only), None) | (None, Some(only)) => Some(format!("[{only}]")),
         (None, None) => None,
     }

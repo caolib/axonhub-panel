@@ -52,7 +52,7 @@ fn cost_keeps_sub_cent_precision() {
 fn latency_names_whichever_side_arrived() {
     assert_eq!(
         latency(Some(789_200), Some(456_500)).as_deref(),
-        Some("[789.2s/456.5s]")
+        Some("[456.5s·789.2s]")
     );
     assert_eq!(latency(Some(4_500), None).as_deref(), Some("[4.5s]"));
     assert_eq!(latency(None, None), None);
