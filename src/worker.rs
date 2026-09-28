@@ -34,7 +34,6 @@ pub enum Update {
     /// A fresh page of AxonHub requests, merged across every account.
     Snapshot {
         rows: Vec<Row>,
-        total: i64,
     },
     /// Which accounts answered and which are broken, sent when that changes.
     Accounts {
@@ -174,7 +173,6 @@ impl Drop for Worker {
 #[derive(Default)]
 struct Cycle {
     rows: Vec<Row>,
-    total: i64,
     /// Accounts that answered.
     open: Vec<String>,
     /// Accounts that failed, with a short reason.
@@ -381,8 +379,7 @@ fn run(
                     id_filter.as_deref(),
                     statuses.as_deref(),
                 ) {
-                    Ok((requests, total)) => {
-                        cycle.total += total;
+                    Ok((requests, _total)) => {
                         cycle.rows.extend(
                             crate::client::rows_from(&requests)
                                 .into_iter()
@@ -436,7 +433,6 @@ fn run(
                 backoff = Duration::ZERO;
                 let _ = updates.send(Update::Snapshot {
                     rows: std::mem::take(&mut cycle.rows),
-                    total: cycle.total,
                 });
             }
 

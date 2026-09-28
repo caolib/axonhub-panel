@@ -1827,7 +1827,6 @@ fn paint(hwnd: HWND) {
                 } else {
                     let view = ListView {
                         rows: &s.app.rows,
-                        total: s.app.total,
                         now: now_unix(),
                         scroll: s.app.scroll,
                         hover: s.app.hover,
@@ -2231,7 +2230,6 @@ fn on_left_up(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
 fn list_view(s: &State) -> ListView<'_> {
     ListView {
         rows: &s.app.rows,
-        total: s.app.total,
         now: now_unix(),
         scroll: s.app.scroll,
         hover: s.app.hover,

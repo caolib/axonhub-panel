@@ -5,7 +5,6 @@ use crate::ui::layout::Metrics;
 fn view<'a>(rows: &'a [Row], pinned: bool) -> ListView<'a> {
     ListView {
         rows,
-        total: rows.len() as i64,
         now: 0,
         scroll: 0.0,
         hover: None,

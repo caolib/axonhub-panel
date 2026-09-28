@@ -49,8 +49,6 @@ pub struct App {
     /// The truncated list the UI renders, rebuilt on every update.
     pub rows: Vec<Row>,
     axon_rows: Vec<Row>,
-    axon_total: i64,
-    pub total: i64,
     /// Selected status-filter bits, sent as `statusIn` on the next poll.
     /// `FILTER_NONE` omits the field and asks for every status.
     pub filter: FilterMask,
@@ -91,8 +89,6 @@ impl App {
             accounts: config.accounts.clone(),
             rows: Vec::new(),
             axon_rows: Vec::new(),
-            axon_total: 0,
-            total: 0,
             filter: model::FILTER_NONE,
             id_query: None,
             id_draft: String::new(),
@@ -196,9 +192,8 @@ impl App {
                     self.accounts = self.config.accounts.clone();
                     self.save();
                 }
-                Update::Snapshot { rows, total } => {
+                Update::Snapshot { rows, .. } => {
                     self.axon_rows = rows;
-                    self.axon_total = total;
                     self.rebuild();
                     self.status = self.status_line();
                 }
@@ -320,7 +315,6 @@ impl App {
         }
         rows.truncate(self.config.row_limit.max(1) as usize);
         self.rows = rows;
-        self.total = self.axon_total;
         if self.selected.is_some_and(|sel| sel >= self.rows.len()) {
             self.selected = None;
         }
@@ -367,7 +361,6 @@ impl App {
         }
         self.filter = next;
         self.axon_rows.clear();
-        self.axon_total = 0;
         self.rebuild();
         true
     }

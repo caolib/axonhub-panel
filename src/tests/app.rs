@@ -38,7 +38,6 @@ fn row(status: Status) -> Row {
 
 fn seeded() -> App {
     let mut app = App::new(Config::default());
-    app.axon_total = 5;
     app.axon_rows = vec![
         row(Status::Completed),
         row(Status::Failed),
@@ -60,7 +59,6 @@ fn filter_click_sets_the_mask_and_drops_the_stale_page() {
     assert!(app.click_filter(Filter::Completed));
     assert_eq!(app.filter, model::FILTER_COMPLETED);
     assert!(app.rows.is_empty());
-    assert_eq!(app.total, 0);
 
     assert!(app.click_filter(Filter::All));
     assert_eq!(app.filter, model::FILTER_NONE);
@@ -109,7 +107,6 @@ fn hiding_a_channel_only_drops_that_accounts_rows() {
     from_b.account_name = "B".into();
     from_b.channel = Some("relay".into());
     app.axon_rows = vec![from_a, from_b];
-    app.axon_total = 2;
     app.rebuild();
     assert_eq!(app.rows.len(), 2);
 
@@ -137,7 +134,6 @@ fn model_abbreviations_apply_on_rebuild_and_survive_it() {
     routed.model = "deepseek-v4.1-flash".into();
     routed.routed_model = Some("DeepSeek-R1".into());
     app.axon_rows = vec![routed];
-    app.axon_total = 1;
     app.config.upsert_model_alias("deepseek", "ds");
     app.rebuild();
 

@@ -159,7 +159,6 @@ impl CardMetrics {
 /// Everything the list needs besides the rows themselves.
 pub struct ListView<'a> {
     pub rows: &'a [Row],
-    pub total: i64,
     /// Unix seconds, used to render relative ages.
     pub now: i64,
     pub scroll: f32,
@@ -252,14 +251,6 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     let s = m.scale;
     let y = 6.0 * s;
 
-    // Right side: active count and total, split by a separator. While a
-    // status filter is active the left number is the page the server returned.
-    let active = v.rows.iter().filter(|r| r.status.is_active()).count();
-    let blue_num = if v.filter == model::FILTER_NONE {
-        active
-    } else {
-        v.rows.len()
-    };
     let settings = settings_button(m);
     // A red pill is the panel's only hint that an account needs attention, so
     // it stays red until the account signs in again.
@@ -341,17 +332,6 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
             theme::TEXT,
         );
     }
-    let right = id_box.x - 8.0 * s;
-
-    let blue_str = blue_num.to_string();
-    let gray_text = if blue_num > 0 {
-        format!(" / {}", v.total)
-    } else {
-        v.total.to_string()
-    };
-    let aw = p.dual_measure(&fonts.small, &blue_str);
-    let gw = p.dual_measure(&fonts.small, &gray_text);
-    let right_w = if blue_num > 0 { aw + gw } else { gw };
 
     // Lock icon when window position is pinned.
     let sub_x = if v.pinned {
@@ -418,23 +398,17 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         x += FILTER_W * s + FILTER_GAP * s;
     }
 
-    let sub_right = right - right_w - 8.0 * s;
+    // The subtitle stops at the left edge of the id field.
+    let sub_right = id_box.x - 8.0 * s;
     let sub_w = (sub_right - x).max(0.0);
 
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(user) = v.user {
-        parts.push(user.to_string());
-    }
-    parts.push(v.rows.len().to_string());
-    // Without a footer, the status line shares the subtitle. A failure takes
-    // the line over entirely, since it matters more than the usual detail.
     let (text, color) = match &v.status_text {
         Some((message, true)) => (message.clone(), theme::RED),
-        Some((message, false)) => (
-            format!("{}  ·  {}", parts.join("  ·  "), message),
-            theme::GREEN,
-        ),
-        None => (parts.join("  ·  "), theme::TEXT_FAINT),
+        Some((message, false)) => match v.user {
+            Some(user) => (format!("{user}  ·  {message}"), theme::GREEN),
+            None => (message.clone(), theme::GREEN),
+        },
+        None => (v.user.unwrap_or_default().to_string(), theme::TEXT_FAINT),
     };
     p.dual_text(
         &fonts.small,
@@ -444,29 +418,6 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
         sub_w,
         18.0 * s,
         color,
-        theme::ALIGN_NEAR,
-    );
-
-    if blue_num > 0 {
-        p.dual_text(
-            &fonts.small,
-            &blue_str,
-            right - right_w,
-            y,
-            aw,
-            18.0 * s,
-            theme::BLUE,
-            theme::ALIGN_NEAR,
-        );
-    }
-    p.dual_text(
-        &fonts.small,
-        &gray_text,
-        right - gw,
-        y,
-        gw,
-        18.0 * s,
-        theme::TEXT_DIM,
         theme::ALIGN_NEAR,
     );
 
