@@ -15,6 +15,9 @@ pub const CARD_H: f32 = 68.0;
 pub const CARD_H_SINGLE: f32 = 26.0;
 pub const CARD_GAP: f32 = 4.0;
 pub const HEADER_H: f32 = 30.0;
+/// Height of one table row. Rows sit flush against each other (no gap), so the
+/// pitch is exactly this.
+pub const TABLE_ROW_H: f32 = 22.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Rect {
@@ -30,14 +33,26 @@ impl Rect {
     }
 }
 
+/// How the list area renders the requests. Every mode keeps one entry per
+/// request; they differ in the row they draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutMode {
+    /// Two-line cards: the roomy default.
+    Cards,
+    /// One-line cards: the same information compressed onto a single row.
+    SingleLine,
+    /// One table row per request: aligned columns, no card chrome.
+    Table,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Metrics {
     pub width: f32,
     pub height: f32,
     /// Device-pixel scale of the monitor the window is on (1.0 at 96 DPI).
     pub scale: f32,
-    /// Whether cards are drawn as one line (the compact layout) instead of two.
-    pub single_line: bool,
+    /// Which layout the list area draws.
+    pub mode: LayoutMode,
     pub header_h: f32,
     pub card_h: f32,
     pub card_gap: f32,
@@ -52,19 +67,25 @@ impl Metrics {
             width,
             height,
             scale: s,
-            single_line: false,
+            mode: LayoutMode::Cards,
             header_h: HEADER_H * s,
             card_h: CARD_H * s,
             card_gap: CARD_GAP * s,
         }
     }
 
-    /// Adopt the single-line card height. Everything derived from `card_h` —
-    /// the pitch, card rectangles, hit areas and scroll range — follows, so the
-    /// caller only has to swap the layout flag.
-    pub fn with_single_line(mut self, on: bool) -> Self {
-        self.single_line = on;
-        self.card_h = (if on { CARD_H_SINGLE } else { CARD_H }) * self.scale;
+    /// Adopt one layout mode's row height. Everything derived from `card_h` —
+    /// the pitch, row rectangles, hit areas and scroll range — follows, so the
+    /// caller only has to swap the mode.
+    pub fn with_mode(mut self, mode: LayoutMode) -> Self {
+        let (height, gap) = match mode {
+            LayoutMode::Cards => (CARD_H, CARD_GAP),
+            LayoutMode::SingleLine => (CARD_H_SINGLE, CARD_GAP),
+            LayoutMode::Table => (TABLE_ROW_H, 0.0),
+        };
+        self.mode = mode;
+        self.card_h = height * self.scale;
+        self.card_gap = gap * self.scale;
         self
     }
 
@@ -72,11 +93,12 @@ impl Metrics {
         PAD * self.scale
     }
 
-    /// Vertical distance between the tops of adjacent cards.
+    /// Vertical distance between the tops of adjacent rows.
     pub fn pitch(&self) -> f32 {
         self.card_h + self.card_gap
     }
 
+    /// Where the scrollable rows start: right below the panel header.
     pub fn rows_top(&self) -> f32 {
         self.header_h
     }
@@ -150,9 +172,9 @@ impl Metrics {
     }
 }
 
-/// How many whole request cards fit at `scale`.
-pub fn rows_in_height(height: f32, scale: f32, single_line: bool) -> usize {
-    let m = Metrics::new(0.0, height, scale).with_single_line(single_line);
+/// How many whole request rows fit at `scale`.
+pub fn rows_in_height(height: f32, scale: f32, mode: LayoutMode) -> usize {
+    let m = Metrics::new(0.0, height, scale).with_mode(mode);
     let viewport = m.rows_viewport_h();
     if viewport <= 0.0 {
         return 1;
@@ -160,13 +182,13 @@ pub fn rows_in_height(height: f32, scale: f32, single_line: bool) -> usize {
     ((viewport + m.card_gap) / m.pitch()).floor().max(1.0) as usize
 }
 
-/// Window height that shows exactly `rows` cards with no partial card left over,
+/// Window height that shows exactly `rows` rows with no partial row left over,
 /// at `scale`. Callers clamp the result to the monitor work area: a tall panel
 /// on a short screen is expected to scroll rather than overflow.
-pub fn height_for_rows(rows: usize, scale: f32, single_line: bool) -> i32 {
-    let m = Metrics::new(0.0, 0.0, scale).with_single_line(single_line);
+pub fn height_for_rows(rows: usize, scale: f32, mode: LayoutMode) -> i32 {
+    let m = Metrics::new(0.0, 0.0, scale).with_mode(mode);
     let rows = rows.max(1);
-    (m.header_h + rows as f32 * m.pitch() - m.card_gap).ceil() as i32
+    (m.rows_top() + rows as f32 * m.pitch() - m.card_gap).ceil() as i32
 }
 
 /// Device pixels for a length authored at 96 DPI. The saved window size is kept

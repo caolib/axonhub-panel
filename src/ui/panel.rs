@@ -12,7 +12,8 @@ use crate::config::{Account, DisplayField};
 use crate::format as fmt;
 use crate::model::{self, Filter, FilterMask, Row};
 use crate::theme::{self, Painter};
-use crate::ui::layout::{Metrics, Rect};
+use crate::ui::layout::{LayoutMode, Metrics, Rect};
+use crate::ui::table;
 
 /// Colours that mark which account a card came from, chosen by position in the
 /// account list so an account keeps its colour across repaints. Deliberately
@@ -20,7 +21,7 @@ use crate::ui::layout::{Metrics, Rect};
 const ACCOUNT_COLORS: [u32; 4] = [theme::MAUVE, theme::ORANGE, theme::CYAN, 0xFFB0_B8C4];
 
 /// The colour of one account's tag.
-fn account_color(accounts: &[Account], id: &str) -> u32 {
+pub(crate) fn account_color(accounts: &[Account], id: &str) -> u32 {
     accounts
         .iter()
         .position(|a| a.id == id)
@@ -81,7 +82,7 @@ fn rank_palette(names: &mut [(&str, u32)]) {
 }
 
 /// Map each distinct channel in `rows` (newest first) to a palette colour.
-fn channel_palette(rows: &[Row]) -> Vec<(&str, u32)> {
+pub(crate) fn channel_palette(rows: &[Row]) -> Vec<(&str, u32)> {
     let mut map: Vec<(&str, u32)> = Vec::new();
     for row in rows {
         if let Some(ch) = &row.channel {
@@ -95,7 +96,7 @@ fn channel_palette(rows: &[Row]) -> Vec<(&str, u32)> {
 }
 
 /// Map each distinct served model in `rows` (newest first) to a palette colour.
-fn model_palette(rows: &[Row]) -> Vec<(&str, u32)> {
+pub(crate) fn model_palette(rows: &[Row]) -> Vec<(&str, u32)> {
     let mut map: Vec<(&str, u32)> = Vec::new();
     for row in rows {
         let model = row.served_model();
@@ -129,6 +130,7 @@ struct CardMetrics {
 impl CardMetrics {
     fn new(m: Metrics) -> Self {
         let s = m.scale;
+        let single = m.mode == LayoutMode::SingleLine;
         CardMetrics {
             inner_pad: INNER_PAD * s,
             line1: LINE1_H * s,
@@ -137,11 +139,11 @@ impl CardMetrics {
             accent_w: ACCENT_W * s,
             // A single-line card gives the accent bar less inset, or the bar
             // would be shorter than the text it flanks.
-            accent_inset: (if m.single_line { 4.0 } else { ACCENT_INSET }) * s,
+            accent_inset: (if single { 4.0 } else { ACCENT_INSET }) * s,
             gap: 3.0 * s,
             chip_hpad: 4.0 * s,
             chip_vpad: 2.0 * s,
-            single: m.single_line,
+            single,
         }
     }
 
@@ -168,8 +170,9 @@ pub struct ListView<'a> {
     pub user: Option<&'a str>,
     /// Saved accounts; more than one means every card is tagged with its own.
     pub accounts: &'a [Account],
-    /// An account is waiting on a fresh sign-in: the settings button turns red,
-    /// since re-signing in is what fixes it.
+    /// An account did not answer the last poll — the server is unreachable or
+    /// its token was rejected: the settings button turns red, since that is
+    /// where accounts are managed and fixed.
     pub settings_alert: bool,
     pub pinned: bool,
     /// Selected status-filter bits; the header chips highlight against this.
@@ -192,11 +195,30 @@ impl ListView<'_> {
     }
 }
 
-pub fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
+/// Draw one frame. Returns the client width the table wants when that differs
+/// from the one the window has, so the caller can resize; card layouts and the
+/// empty list ask for nothing.
+pub fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) -> Option<f32> {
     p.fill_rect(0.0, 0.0, m.width, m.height, theme::BG);
     draw_header(p, fonts, m, v);
-    draw_rows(p, fonts, m, v);
+    let wanted = if m.mode == LayoutMode::Table {
+        table::draw(p, fonts, m, v).map(|w| w.max(header_min_width(m)))
+    } else {
+        draw_rows(p, fonts, m, v);
+        None
+    };
     draw_edge(p, m);
+    wanted
+}
+
+/// Width the header's controls need so nothing overlaps: the filter chips run
+/// from the left edge, and the id field, the settings button and the padding
+/// follow them. Below it the subtitle is squeezed out; below *this* the chips
+/// would sit on top of the id field, so the table never asks for less.
+pub fn header_min_width(m: Metrics) -> f32 {
+    let s = m.scale;
+    let chips = FILTERS.len() as f32 * FILTER_W + (FILTERS.len() - 1) as f32 * FILTER_GAP;
+    (2.0 + chips + 8.0 + ID_BOX_W + 6.0 + 40.0) * s + m.pad() * 2.0
 }
 
 /// One-pixel outline so the panel separates from whatever is behind it.
@@ -253,7 +275,7 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
 
     let settings = settings_button(m);
     // A red pill is the panel's only hint that an account needs attention, so
-    // it stays red until the account signs in again.
+    // it stays red until the account answers a poll again.
     let (settings_fill, settings_text) = if v.settings_alert {
         (theme::with_alpha(theme::RED, 0x38), theme::RED)
     } else {
@@ -424,23 +446,29 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     p.fill_rect(0.0, m.header_h - 1.0, m.width, 1.0, theme::SEPARATOR);
 }
 
+/// The placeholder for a list with nothing to show, shared by the card and
+/// table layouts.
+pub(crate) fn draw_empty(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
+    let label = if v.id_query.is_some() {
+        "未找到该模型"
+    } else {
+        "等待数据…"
+    };
+    p.dual_text(
+        &fonts.body,
+        label,
+        0.0,
+        m.rows_top() + m.rows_viewport_h() / 2.0 - 10.0 * m.scale,
+        m.width,
+        20.0 * m.scale,
+        theme::TEXT_FAINT,
+        theme::ALIGN_CENTER,
+    );
+}
+
 fn draw_rows(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     if v.rows.is_empty() {
-        let label = if v.id_query.is_some() {
-            "未找到该模型"
-        } else {
-            "等待数据…"
-        };
-        p.dual_text(
-            &fonts.body,
-            label,
-            0.0,
-            m.rows_top() + m.rows_viewport_h() / 2.0 - 10.0 * m.scale,
-            m.width,
-            20.0 * m.scale,
-            theme::TEXT_FAINT,
-            theme::ALIGN_CENTER,
-        );
+        draw_empty(p, fonts, m, v);
         return;
     }
 

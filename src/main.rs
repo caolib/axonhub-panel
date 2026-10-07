@@ -55,7 +55,7 @@ use config::{
 use theme::{Fonts, Painter};
 use time::now_unix;
 use ui::detail::{self, Button};
-use ui::layout::Metrics;
+use ui::layout::{LayoutMode, Metrics};
 use ui::login::{self, Action as LoginAction, Field, Method};
 use ui::panel::{self, ListView};
 use worker::{Command, Target, Update, Worker};
@@ -158,11 +158,11 @@ fn sync_scale(hwnd: HWND) {
     let width = ((rc.right - rc.left) as f32 * ratio).round() as i32;
     let mut height = ((rc.bottom - rc.top) as f32 * ratio).round() as i32;
 
-    // Whole cards only: derive the height from the row count so no partial
+    // Whole rows only: derive the height from the row count so no partial
     // card is left over, and keep the panel inside this monitor's work area.
     let work = work_area_for(hwnd);
-    let single = single_line_mode();
-    let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale, single).min(work.3 - work.1);
+    let mode = layout_mode();
+    let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale, mode).min(work.3 - work.1);
     if fitted > 0 {
         height = fitted;
     }
@@ -175,7 +175,7 @@ fn sync_scale(hwnd: HWND) {
         },
         work,
         scale,
-        single,
+        mode,
     );
     unsafe {
         let _ = SetWindowPos(
@@ -198,11 +198,11 @@ fn config_rows(hwnd: HWND) -> usize {
     State::with(|s| s.app.config.row_limit.max(1) as usize).unwrap_or(12)
 }
 
-/// Whether cards are drawn as one line instead of two. Read on its own rather
-/// than inside another `State::with`: `window_scale` already borrows the state,
-/// and nesting the borrow would panic.
-fn single_line_mode() -> bool {
-    State::with(|s| s.app.config.single_line).unwrap_or(false)
+/// Which layout the list area draws. Read on its own rather than inside another
+/// `State::with`: `window_scale` already borrows the state, and nesting the
+/// borrow would panic.
+fn layout_mode() -> LayoutMode {
+    State::with(|s| s.app.config.layout_mode()).unwrap_or(LayoutMode::Cards)
 }
 
 /// Rows that fit in the window at its current size.
@@ -212,7 +212,7 @@ fn current_visible_rows(hwnd: HWND) -> usize {
         let _ = GetClientRect(hwnd, &mut rc);
     }
     let height = (rc.bottom - rc.top) as f32;
-    ui::layout::rows_in_height(height, window_scale(hwnd), single_line_mode())
+    ui::layout::rows_in_height(height, window_scale(hwnd), layout_mode())
 }
 
 /// Context-menu command ids.
@@ -229,6 +229,8 @@ const MENU_ROWS_20: usize = 1403;
 const MENU_QUIT: usize = 1300;
 /// Toggle the one-line card layout.
 const MENU_SINGLE_LINE: usize = 1204;
+/// Toggle the table layout.
+const MENU_TABLE_MODE: usize = 1205;
 /// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` =
 /// 24 px. The menu lists common integer steps; the settings field accepts
 /// anything in `config::FONT_SIZE_MIN..=FONT_SIZE_MAX`.
@@ -340,8 +342,13 @@ fn edge_at(m: Metrics, x: f32, y: f32) -> Option<Edge> {
     if x < 0.0 || y < 0.0 || x > w || y > h {
         return None;
     }
-    let left = x <= RESIZE_BORDER;
-    let right = x >= w - RESIZE_BORDER;
+    let (left, right) = if m.mode == LayoutMode::Table {
+        // The table's width follows its columns, so a horizontal drag would be
+        // undone by the next fit; the side margins drag the window instead.
+        (false, false)
+    } else {
+        (x <= RESIZE_BORDER, x >= w - RESIZE_BORDER)
+    };
     let top = y <= RESIZE_BORDER;
     let bottom = y >= h - RESIZE_BORDER;
     Some(match (left, right, top, bottom) {
@@ -410,7 +417,7 @@ fn metrics_for(hwnd: HWND) -> Metrics {
         (rc.bottom - rc.top) as f32,
         window_scale(hwnd),
     )
-    .with_single_line(single_line_mode())
+    .with_mode(layout_mode())
 }
 
 /// Windows' per-monitor DPI setting as a scale over the 96-DPI baseline GDI+
@@ -762,13 +769,10 @@ fn main() {
             ui::layout::logical_px(saved.width.max(1), scale)
         };
         let work = work_area_for(hwnd);
+        let mode = config.layout_mode();
         let width = ui::layout::device_px(logical_width, scale);
-        let height = ui::layout::height_for_rows(
-            config.row_limit.max(1) as usize,
-            scale,
-            config.single_line,
-        )
-        .min(work.3 - work.1);
+        let height = ui::layout::height_for_rows(config.row_limit.max(1) as usize, scale, mode)
+            .min(work.3 - work.1);
         let (x, y) = if saved.x < 0 && saved.y < 0 {
             // First run: pin to the top-right of the primary work area now that
             // the real width is known.
@@ -785,7 +789,7 @@ fn main() {
             },
             work,
             scale,
-            config.single_line,
+            mode,
         );
         let _ = SetWindowPos(
             hwnd,
@@ -910,7 +914,7 @@ fn clamp_window_rect(rect: RECT, work: (i32, i32, i32, i32), hwnd: HWND) -> Wind
         },
         work,
         window_scale(hwnd),
-        single_line_mode(),
+        layout_mode(),
     )
 }
 
@@ -988,6 +992,52 @@ fn fit_window_to_work_area(hwnd: HWND) {
     }
 }
 
+/// Refit the panel after a layout switch: height for the configured row count
+/// in the current mode, clamped to the work area. `restore_card_width` puts
+/// the width back to the one the config kept for card mode — the table's width
+/// is driven by its columns instead, and is fitted on the next paint.
+fn refit_layout(hwnd: HWND, restore_card_width: bool) {
+    let mode = layout_mode();
+    let scale = window_scale(hwnd);
+    let work = work_area_for(hwnd);
+    let height = ui::layout::height_for_rows(config_rows(hwnd), scale, mode).min(work.3 - work.1);
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut rc);
+    }
+    let width = if restore_card_width {
+        let logical = State::with(|s| s.app.config.window.width).unwrap_or(452);
+        ui::layout::device_px(logical, scale)
+    } else {
+        rc.right - rc.left
+    };
+    let placed = config::clamp_to_virtual_screen(
+        WindowState {
+            x: rc.left,
+            y: rc.top,
+            width,
+            height,
+        },
+        work,
+        scale,
+        mode,
+    );
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            placed.x,
+            placed.y,
+            placed.width,
+            placed.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    clamp_scroll(hwnd);
+    save_window_state(hwnd);
+    invalidate(hwnd);
+}
+
 fn apply_window_chrome(hwnd: HWND) {
     use windows::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute};
     unsafe {
@@ -1030,7 +1080,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
     let mut actions: Vec<Action> = Vec::new();
 
     match msg {
-        WM_PAINT => paint(hwnd),
+        WM_PAINT => {
+            if let Some(width) = paint(hwnd) {
+                actions.push(Action::FitTableWidth(width));
+            }
+        }
         WM_NCHITTEST => {
             // A borderless WS_POPUP window has neither a sizing frame nor a
             // draggable title, so both are synthesised here. Anything that must
@@ -1050,7 +1104,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 (rc.bottom - rc.top) as f32,
                 window_scale(hwnd),
             )
-            .with_single_line(single_line_mode());
+            .with_mode(layout_mode());
 
             return LRESULT(hit_test(m, x, y));
         }
@@ -1066,7 +1120,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 (rc.bottom - rc.top) as f32,
                 window_scale(hwnd),
             )
-            .with_single_line(single_line_mode());
+            .with_mode(layout_mode());
             let local_x = (cursor.x - rc.left) as f32;
             let local_y = (cursor.y - rc.top) as f32;
             // The sign-in form's text rows are the one place where the pointer
@@ -1103,16 +1157,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_GETMINMAXINFO => {
             // Keep the panel usable: wide enough for the metric row, tall enough
-            // for the header and a couple of cards, in device pixels. The floor
-            // is lower in single-line mode, where the five-row preset is only
-            // ~176 logical pixels tall.
-            let scale = window_scale(hwnd);
-            let min_h = if single_line_mode() { 110.0 } else { 200.0 };
+            // for the header and a couple of rows. The floor follows the layout
+            // (single-line and table rows are much shorter than cards).
+            let (min_w, min_h) = config::min_window_size(window_scale(hwnd), layout_mode());
             let info = unsafe { &mut *(lp.0 as *mut MINMAXINFO) };
-            info.ptMinTrackSize = POINT {
-                x: (320.0 * scale) as i32,
-                y: (min_h * scale) as i32,
-            };
+            info.ptMinTrackSize = POINT { x: min_w, y: min_h };
             return LRESULT(0);
         }
         WM_EXITSIZEMOVE => {
@@ -1252,10 +1301,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 y = suggested.top;
             }
 
-            // Whole cards only: derive the height from the row count instead of
-            // trusting the scaled pixel value, so no partial card is left over.
+            // Whole rows only: derive the height from the row count instead of
+            // trusting the scaled pixel value, so no partial row is left over.
             let work = work_area_at(x, y);
-            let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale, single_line_mode())
+            let fitted = ui::layout::height_for_rows(config_rows(hwnd), scale, layout_mode())
                 .min(work.3 - work.1);
             if fitted > 0 {
                 height = fitted;
@@ -1386,6 +1435,11 @@ enum Action {
     /// Switch between the two-line and single-line card layouts. The row count
     /// is kept and the window height refitted to match.
     SetSingleLine(bool),
+    /// Switch the list to the table layout (or back to cards). The row count is
+    /// kept; the width follows the columns, fitted after the next paint.
+    SetTableMode(bool),
+    /// Resize the window to the client width the table's columns asked for.
+    FitTableWidth(i32),
     /// Toggle `WS_EX_NOACTIVATE` so the window can (or cannot) take focus.
     SetActivatable(bool),
     /// Open the error-detail popup for a row of the list.
@@ -1486,8 +1540,8 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 });
                 let scale = window_scale(hwnd);
                 let work = work_area_for(hwnd);
-                let height = ui::layout::height_for_rows(rows, scale, single_line_mode())
-                    .min(work.3 - work.1);
+                let height =
+                    ui::layout::height_for_rows(rows, scale, layout_mode()).min(work.3 - work.1);
                 let mut rc = RECT::default();
                 unsafe {
                     let _ = GetWindowRect(hwnd, &mut rc);
@@ -1550,26 +1604,44 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
             Action::SetSingleLine(on) => {
                 State::with(|s| s.app.config.single_line = on);
                 // Same row count, shorter cards: refit the window to whole
-                // cards of the new height, keeping it on screen.
+                // rows of the new height, keeping it on screen.
+                refit_layout(hwnd, false);
+            }
+            Action::SetTableMode(on) => {
+                State::with(|s| s.app.config.table_mode = on);
+                // Leaving the table hands the width back to the user; entering
+                // it lets the next paint widen the window to fit the columns.
+                refit_layout(hwnd, !on);
+            }
+            Action::FitTableWidth(width) => {
+                // The table asked for a width the window does not have yet.
+                // Clamping may pull the window back in (a table wider than the
+                // screen stays at the screen's edge) and may shift x with it;
+                // when nothing changed there is nothing to do, which is also
+                // what stops a too-wide table from resizing on every paint.
                 let scale = window_scale(hwnd);
                 let work = work_area_for(hwnd);
-                let height =
-                    ui::layout::height_for_rows(config_rows(hwnd), scale, on).min(work.3 - work.1);
                 let mut rc = RECT::default();
                 unsafe {
                     let _ = GetWindowRect(hwnd, &mut rc);
+                }
+                if width == rc.right - rc.left {
+                    continue;
                 }
                 let placed = config::clamp_to_virtual_screen(
                     WindowState {
                         x: rc.left,
                         y: rc.top,
-                        width: rc.right - rc.left,
-                        height,
+                        width,
+                        height: rc.bottom - rc.top,
                     },
                     work,
                     scale,
-                    on,
+                    layout_mode(),
                 );
+                if placed.width == rc.right - rc.left && placed.x == rc.left {
+                    continue;
+                }
                 unsafe {
                     let _ = SetWindowPos(
                         hwnd,
@@ -1581,7 +1653,6 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                 }
-                clamp_scroll(hwnd);
                 save_window_state(hwnd);
                 invalidate(hwnd);
             }
@@ -1732,10 +1803,18 @@ fn save_window_state(hwnd: HWND) {
             };
         }
         s.app.config.logical_window = true;
+        // The table's width follows its columns, so the live width is not the
+        // user's choice while it is on: keep the card-mode width instead, and
+        // leaving the table restores it.
+        let width = if s.app.config.table_mode {
+            s.app.config.window.width
+        } else {
+            ui::layout::logical_px((rc.right - rc.left).max(320), scale)
+        };
         s.app.config.window = WindowState {
             x: rc.left,
             y: rc.top,
-            width: ui::layout::logical_px((rc.right - rc.left).max(320), scale),
+            width,
             height: ui::layout::logical_px((rc.bottom - rc.top).max(240), scale),
         };
         s.app.save();
@@ -1802,7 +1881,10 @@ where
     }
 }
 
-fn paint(hwnd: HWND) {
+/// Paint one frame. Returns the client width the panel wants to be — the
+/// table's column fit — when it differs from the one it has, so the caller can
+/// queue a resize; `None` means the current size is right.
+fn paint(hwnd: HWND) -> Option<i32> {
     unsafe {
         let mut ps = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut ps);
@@ -1813,17 +1895,18 @@ fn paint(hwnd: HWND) {
             (rc.bottom - rc.top) as f32,
             window_scale(hwnd),
         )
-        .with_single_line(single_line_mode());
+        .with_mode(layout_mode());
 
         // Draw the whole frame into an off-screen bitmap and present it with one
         // BitBlt. Painting the window DC directly lets each invalidate show a
         // partially drawn frame, which the user sees as flicker.
-        let _ = with_double_buffer(hdc, rc, |painter| {
+        let desired = with_double_buffer(hdc, rc, |painter| {
             State::with(|s| {
                 if s.app.is_login() {
                     if let Some(form) = s.app.login.as_ref() {
                         login::draw(&painter, &s.fonts, form, m);
                     }
+                    None
                 } else {
                     let view = ListView {
                         rows: &s.app.rows,
@@ -1843,12 +1926,20 @@ fn paint(hwnd: HWND) {
                         id_editing: s.app.id_editing,
                         id_caret: s.app.id_caret,
                     };
-                    panel::draw(&painter, &s.fonts, m, &view);
+                    panel::draw(&painter, &s.fonts, m, &view)
                 }
-            });
-        });
+            })
+            .flatten()
+        })
+        .flatten();
 
         let _ = EndPaint(hwnd, &ps);
+
+        // Within a pixel is already right: rounding alone must not queue a
+        // resize, or every repaint would ask for one more.
+        desired
+            .filter(|w| (w - m.width).abs() > 1.0)
+            .map(|w| w.ceil() as i32)
     }
 }
 
@@ -2561,6 +2652,10 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
             let on = !s.app.config.single_line;
             actions.push(Action::SetSingleLine(on));
         }
+        MENU_TABLE_MODE => {
+            let on = !s.app.config.table_mode;
+            actions.push(Action::SetTableMode(on));
+        }
         MENU_OPEN => {
             // Reached with no or one account; with several the entry becomes a
             // submenu and the account branch below handles it. An account's own
@@ -2691,6 +2786,9 @@ fn show_menu(hwnd: HWND) {
         // One-line card layout: same row count, shorter cards, shorter panel.
         let single = State::with(|s| s.app.config.single_line).unwrap_or(false);
         add("单行模式", MENU_SINGLE_LINE, single, true);
+        // Table layout: one row per request, the window widened to fit.
+        let table = State::with(|s| s.app.config.table_mode).unwrap_or(false);
+        add("表格模式", MENU_TABLE_MODE, table, true);
 
         add("刷新", MENU_REFRESH, false, true);
         // Several accounts are several servers, so the entry turns into a
@@ -2819,7 +2917,8 @@ fn fit_detail_height(hwnd: HWND, scale: f32, depth: detail::Depth) {
         },
         work,
         scale,
-        false,
+        // The popup is a document, not the list: its floor is the card one.
+        LayoutMode::Cards,
     );
     unsafe {
         let _ = SetWindowPos(

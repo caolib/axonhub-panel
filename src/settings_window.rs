@@ -803,6 +803,7 @@ fn dispatch(hwnd: HWND, action: Action) {
         Action::FontFamily(name) => actions.push(PanelAction::SetFontFamily(name)),
         Action::FontSearch => focus_control(hwnd, false),
         Action::SingleLine => crate::on_command(WPARAM(crate::MENU_SINGLE_LINE), &mut actions),
+        Action::TableMode => crate::on_command(WPARAM(crate::MENU_TABLE_MODE), &mut actions),
         Action::Pin => crate::on_command(WPARAM(crate::MENU_PIN_POSITION), &mut actions),
         Action::Topmost => crate::on_command(WPARAM(crate::MENU_TOPMOST), &mut actions),
         Action::Bottommost => crate::on_command(WPARAM(crate::MENU_BOTTOMMOST), &mut actions),

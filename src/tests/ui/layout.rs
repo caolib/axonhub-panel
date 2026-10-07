@@ -12,14 +12,14 @@ fn layout_scales_with_the_monitor() {
 
 #[test]
 fn height_for_rows_round_trips_at_each_scale() {
-    for single_line in [false, true] {
+    for mode in [LayoutMode::Cards, LayoutMode::SingleLine, LayoutMode::Table] {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             for rows in [1usize, 5, 12, 30] {
-                let h = height_for_rows(rows, scale, single_line) as f32;
+                let h = height_for_rows(rows, scale, mode) as f32;
                 assert_eq!(
-                    rows_in_height(h, scale, single_line),
+                    rows_in_height(h, scale, mode),
                     rows,
-                    "single {single_line} scale {scale} rows {rows}: height {h} reported a different count"
+                    "{mode:?} scale {scale} rows {rows}: height {h} reported a different count"
                 );
             }
         }
@@ -29,7 +29,7 @@ fn height_for_rows_round_trips_at_each_scale() {
 #[test]
 fn single_line_cards_are_shorter_but_still_tile() {
     let wide = Metrics::new(400.0, 400.0, 1.5);
-    let compact = Metrics::new(400.0, 400.0, 1.5).with_single_line(true);
+    let compact = Metrics::new(400.0, 400.0, 1.5).with_mode(LayoutMode::SingleLine);
     assert_eq!(compact.card_h, CARD_H_SINGLE * 1.5);
     assert_eq!(compact.pitch(), (CARD_H_SINGLE + CARD_GAP) * 1.5);
 
@@ -41,9 +41,38 @@ fn single_line_cards_are_shorter_but_still_tile() {
     // The compact card is shorter than the two-line one and the same
     // window height holds more of them...
     assert!(compact.card_h < wide.card_h);
-    assert!(rows_in_height(400.0, 1.5, true) > rows_in_height(400.0, 1.5, false));
-    // ...and flipping the flag back restores the authored height.
-    assert_eq!(compact.with_single_line(false).card_h, wide.card_h);
+    assert!(
+        rows_in_height(400.0, 1.5, LayoutMode::SingleLine)
+            > rows_in_height(400.0, 1.5, LayoutMode::Cards)
+    );
+    // ...and flipping the mode back restores the authored height.
+    assert_eq!(compact.with_mode(LayoutMode::Cards).card_h, wide.card_h);
+}
+
+#[test]
+fn table_rows_tile_flush_against_the_panel_header() {
+    let table = Metrics::new(400.0, 400.0, 1.0).with_mode(LayoutMode::Table);
+    assert_eq!(table.card_h, TABLE_ROW_H);
+    assert_eq!(table.card_gap, 0.0);
+    // The first row starts right below the panel header — there is no column
+    // header row above it.
+    assert_eq!(table.rows_top(), HEADER_H);
+    let first = table.card_rect(0, 0.0);
+    let second = table.card_rect(1, 0.0);
+    assert_eq!(second.y, first.y + TABLE_ROW_H);
+    // No gap between rows, so every pixel of the viewport hits a row.
+    assert_eq!(
+        table.row_at(table.rows_top() + TABLE_ROW_H - 0.5, 0.0, 3),
+        Some(0)
+    );
+    assert_eq!(
+        table.row_at(table.rows_top() + TABLE_ROW_H + 0.5, 0.0, 3),
+        Some(1)
+    );
+    // The height accounts for the header, so a fitted window round-trips.
+    let h = height_for_rows(4, 1.0, LayoutMode::Table) as f32;
+    assert_eq!(rows_in_height(h, 1.0, LayoutMode::Table), 4);
+    assert_eq!(h, HEADER_H + 4.0 * TABLE_ROW_H);
 }
 
 #[test]

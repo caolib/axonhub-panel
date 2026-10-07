@@ -538,6 +538,7 @@ pub fn split_runs(s: &str) -> Vec<(&str, bool)> {
 /// are enumerated rather than queried from the font.
 pub fn is_cjk(c: char) -> bool {
     matches!(c as u32,
+        0x25A0..=0x25FF |   // geometric shapes: dots and the like, full-width in CJK fonts
         0x3000..=0x303F |   // CJK punctuation
         0x3400..=0x4DBF |   // extension A
         0x4E00..=0x9FFF |   // unified ideographs

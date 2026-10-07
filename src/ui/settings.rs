@@ -44,6 +44,7 @@ pub enum Action {
     FontFamily(String),
     FontSearch,
     SingleLine,
+    TableMode,
     Pin,
     Topmost,
     Bottommost,
@@ -447,35 +448,42 @@ impl Layout {
         );
         self.toggle(
             374.0,
+            "表格模式",
+            "一行一条记录，窗口宽度随列宽自动调整",
+            Action::TableMode,
+            c.table_mode,
+        );
+        self.toggle(
+            436.0,
             "固定窗口位置",
             "锁定面板的移动和大小调整",
             Action::Pin,
             c.pin_position,
         );
         self.toggle(
-            436.0,
+            498.0,
             "置顶",
             "让面板保持在其他窗口上方",
             Action::Topmost,
             c.always_on_top,
         );
         self.toggle(
-            498.0,
+            560.0,
             "置底",
             "让面板保持在其他窗口下方",
             Action::Bottommost,
             c.always_on_bottom,
         );
-        self.label(568.0, "常用操作", true);
+        self.label(630.0, "常用操作", true);
         self.choices(
-            600.0,
+            662.0,
             vec![
                 ("刷新请求".into(), Action::Refresh, false),
                 ("打开请求页".into(), Action::OpenRequests, false),
             ],
             2,
         );
-        self.content_height = 648.0;
+        self.content_height = 710.0;
     }
 
     fn fields(&mut self, app: &App) {

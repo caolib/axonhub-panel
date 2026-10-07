@@ -5,3 +5,4 @@ pub mod layout;
 pub mod login;
 pub mod panel;
 pub mod settings;
+pub mod table;

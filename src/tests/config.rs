@@ -106,6 +106,7 @@ fn config_round_trips_through_disk() {
     config.row_limit = 7;
     config.credential_mode = CredentialMode::Password;
     config.single_line = true;
+    config.table_mode = true;
 
     let json = serde_json::to_string(&config).unwrap();
     let back: Config = serde_json::from_str(&json).unwrap();
@@ -113,6 +114,7 @@ fn config_round_trips_through_disk() {
     assert_eq!(back.row_limit, 7);
     assert_eq!(back.credential_mode, CredentialMode::Password);
     assert!(back.single_line);
+    assert!(back.table_mode);
 }
 
 #[test]
@@ -121,6 +123,13 @@ fn a_config_without_single_line_keeps_two_line_cards() {
     // panel to the compact layout.
     let back: Config = serde_json::from_str("{}").unwrap();
     assert!(!back.single_line);
+}
+
+#[test]
+fn a_config_without_table_mode_keeps_the_card_layout() {
+    // Same for the table: an older file starts on cards, not in a table.
+    let back: Config = serde_json::from_str("{}").unwrap();
+    assert!(!back.table_mode);
 }
 
 #[test]
@@ -175,14 +184,14 @@ fn clamping_keeps_the_whole_window_on_one_monitor() {
     // A monitor to the right of the primary one: positive coordinates.
     let right = (1920, 0, 3840, 1040);
     // Dragged past the right edge — pulled back to sit flush against it.
-    let placed = clamp_to_virtual_screen(size(3700, 100), right, 1.0, false);
+    let placed = clamp_to_virtual_screen(size(3700, 100), right, 1.0, LayoutMode::Cards);
     assert_eq!((placed.x, placed.y), (3840 - 452, 100));
     // Dragged below the work area — the taskbar strip is not usable space.
-    let placed = clamp_to_virtual_screen(size(2000, 900), right, 1.0, false);
+    let placed = clamp_to_virtual_screen(size(2000, 900), right, 1.0, LayoutMode::Cards);
     assert_eq!(placed.y, 1040 - 600);
     // Already inside: left exactly where it was.
     let inside = size(2000, 100);
-    let placed = clamp_to_virtual_screen(inside, right, 1.0, false);
+    let placed = clamp_to_virtual_screen(inside, right, 1.0, LayoutMode::Cards);
     assert_eq!(
         (placed.x, placed.y, placed.width, placed.height),
         (2000, 100, 452, 600)
@@ -191,19 +200,19 @@ fn clamping_keeps_the_whole_window_on_one_monitor() {
     // A monitor left of the primary one: negative coordinates must clamp
     // just as well, or the panel would jump back to the primary screen.
     let left = (-1920, 0, 0, 1040);
-    let placed = clamp_to_virtual_screen(size(-2000, -50), left, 1.0, false);
+    let placed = clamp_to_virtual_screen(size(-2000, -50), left, 1.0, LayoutMode::Cards);
     assert_eq!((placed.x, placed.y), (-1920, 0));
-    let placed = clamp_to_virtual_screen(size(-2000, 100), left, 1.0, false);
+    let placed = clamp_to_virtual_screen(size(-2000, 100), left, 1.0, LayoutMode::Cards);
     assert_eq!(placed.x, -1920);
 
     // Bigger than the work area: shrunk to it rather than left hanging off.
-    let placed = clamp_to_virtual_screen(size(0, 0), (0, 0, 1920, 1040), 1.0, false);
+    let placed = clamp_to_virtual_screen(size(0, 0), (0, 0, 1920, 1040), 1.0, LayoutMode::Cards);
     let huge = WindowState {
         width: 3000,
         height: 2000,
         ..placed
     };
-    let placed = clamp_to_virtual_screen(huge, (0, 0, 1920, 1040), 1.0, false);
+    let placed = clamp_to_virtual_screen(huge, (0, 0, 1920, 1040), 1.0, LayoutMode::Cards);
     assert_eq!((placed.width, placed.height), (1920, 1040));
 }
 
@@ -217,12 +226,20 @@ fn the_minimum_size_follows_the_layout_and_the_monitor_scale() {
         height: 100,
     };
     // Two-line cards keep the authored 320x200 floor...
-    let placed = clamp_to_virtual_screen(tiny, screen, 1.0, false);
+    let placed = clamp_to_virtual_screen(tiny, screen, 1.0, LayoutMode::Cards);
     assert_eq!((placed.width, placed.height), (320, 200));
     // ...single-line mode lets a short panel through...
-    let placed = clamp_to_virtual_screen(tiny, screen, 1.0, true);
+    let placed = clamp_to_virtual_screen(tiny, screen, 1.0, LayoutMode::SingleLine);
     assert_eq!((placed.width, placed.height), (320, 110));
-    // ...and both floors scale with the monitor density.
-    let placed = clamp_to_virtual_screen(tiny, screen, 2.0, false);
+    // ...and table mode lowers the floor further, since its rows are the
+    // shortest — a window between the two floors keeps its own height...
+    let placed = clamp_to_virtual_screen(tiny, screen, 1.0, LayoutMode::Table);
+    assert_eq!((placed.width, placed.height), (320, 100));
+    // ...while one under it is pulled up to the table floor.
+    let shorter = WindowState { height: 40, ..tiny };
+    let placed = clamp_to_virtual_screen(shorter, screen, 1.0, LayoutMode::Table);
+    assert_eq!((placed.width, placed.height), (320, 80));
+    // ...and every floor scales with the monitor density.
+    let placed = clamp_to_virtual_screen(tiny, screen, 2.0, LayoutMode::Cards);
     assert_eq!((placed.width, placed.height), (640, 400));
 }

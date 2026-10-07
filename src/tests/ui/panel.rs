@@ -25,8 +25,8 @@ fn view<'a>(rows: &'a [Row], pinned: bool) -> ListView<'a> {
 
 #[test]
 fn both_layouts_fit_their_card_height() {
-    for single in [false, true] {
-        let m = Metrics::new(452.0, 300.0, 1.0).with_single_line(single);
+    for (mode, single) in [(LayoutMode::Cards, false), (LayoutMode::SingleLine, true)] {
+        let m = Metrics::new(452.0, 300.0, 1.0).with_mode(mode);
         let c = CardMetrics::new(m);
         assert_eq!(c.single, single);
         let band = c.band_h(m.card_h);

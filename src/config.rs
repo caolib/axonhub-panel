@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::ui::layout::LayoutMode;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CredentialMode {
@@ -79,6 +81,11 @@ pub struct Config {
     /// height. Toggled from the right-click menu; the window is resized to keep
     /// the same row count, so the panel gets shorter rather than denser.
     pub single_line: bool,
+    /// Draw the requests as a table: one row per request, one column per
+    /// visible cell, with the window widened to fit the columns. Takes
+    /// precedence over `single_line` while it is on. Toggled from the
+    /// right-click menu and the settings window.
+    pub table_mode: bool,
     /// Panel opacity in percent (10–100). 100 is fully opaque; the value is
     /// applied as a Win32 layered-window alpha. Adjustable from the settings
     /// field and clamped to `OPACITY_MIN..=OPACITY_MAX` on load.
@@ -131,7 +138,7 @@ impl Default for WindowState {
             x: -1,
             y: -1,
             width: 452,
-            height: crate::ui::layout::height_for_rows(DEFAULT_ROWS, 1.0, false),
+            height: crate::ui::layout::height_for_rows(DEFAULT_ROWS, 1.0, LayoutMode::Cards),
         }
     }
 }
@@ -150,6 +157,7 @@ impl Default for Config {
             font_family: String::new(),
             cjk_font_family: String::new(),
             single_line: false,
+            table_mode: false,
             opacity: 100,
             always_on_top: true,
             pin_position: false,
@@ -587,6 +595,18 @@ impl Config {
     pub fn show_all_fields(&mut self) {
         self.hidden_fields.clear();
     }
+
+    /// The layout the list area draws. The table wins while it is on, so its
+    /// toggle needs no bookkeeping against `single_line`.
+    pub fn layout_mode(&self) -> LayoutMode {
+        if self.table_mode {
+            LayoutMode::Table
+        } else if self.single_line {
+            LayoutMode::SingleLine
+        } else {
+            LayoutMode::Cards
+        }
+    }
 }
 
 /// Fold the single-account credentials of an older install into the account
@@ -788,6 +808,22 @@ fn clear_stored_in(dir: &Path) {
     let _ = std::fs::remove_file(credentials_path_in(dir));
 }
 
+/// Smallest window the panel allows, in device pixels. The floor follows the
+/// layout: a five-row panel is only ~176 logical pixels tall in single-line
+/// mode, and a table of the same row count ~162, so the card-mode floor would
+/// stretch those windows back out on the next resize or launch.
+pub fn min_window_size(scale: f32, mode: LayoutMode) -> (i32, i32) {
+    let min_h = match mode {
+        LayoutMode::Cards => 200,
+        LayoutMode::SingleLine => 110,
+        LayoutMode::Table => 80,
+    };
+    (
+        crate::ui::layout::device_px(320, scale),
+        crate::ui::layout::device_px(min_h, scale),
+    )
+}
+
 /// Bring the window back on screen if a display change orphaned it, shrinking it
 /// to fit the work area when the display got smaller. `state.width`/`height` are
 /// device pixels; the minimums stay usable by scaling the logical floor.
@@ -796,19 +832,14 @@ fn clear_stored_in(dir: &Path) {
 /// over an edge has no frame to grab back, and one straddling two monitors
 /// reads badly however it is moved. Callers therefore use this both for display
 /// changes and for clamping a move in flight.
-///
-/// The floor is lower in single-line mode: there the five-row preset is only
-/// ~176 logical pixels tall, so a 200-pixel minimum would stretch the window
-/// back out on the next resize or launch.
 pub fn clamp_to_virtual_screen(
     state: WindowState,
     screen: (i32, i32, i32, i32),
     scale: f32,
-    single_line: bool,
+    mode: LayoutMode,
 ) -> WindowState {
     let (left, top, right, bottom) = screen;
-    let min_w = crate::ui::layout::device_px(320, scale);
-    let min_h = crate::ui::layout::device_px(if single_line { 110 } else { 200 }, scale);
+    let (min_w, min_h) = min_window_size(scale, mode);
     let width = state.width.clamp(min_w, (right - left).max(min_w));
     let height = state.height.clamp(min_h, (bottom - top).max(min_h));
     let x = state.x.clamp(left, (right - width).max(left));
