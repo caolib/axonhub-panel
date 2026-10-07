@@ -365,6 +365,16 @@ fn run(
 
             for target in targets.iter_mut() {
                 let Some(token) = target.token.clone() else {
+                    // Without a token the account is skipped below and would
+                    // fall out of the health report, wiping the red settings
+                    // button while the account is still unusable. Keep it in
+                    // the broken list until it signs in again.
+                    cycle.broken.push(AccountIssue {
+                        id: target.id.clone(),
+                        name: target.name.clone(),
+                        message: "缺少令牌,需重新登录".into(),
+                        needs_signin: true,
+                    });
                     continue;
                 };
                 polled = true;

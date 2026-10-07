@@ -142,10 +142,11 @@ impl App {
         })
     }
 
-    /// Whether any account is waiting on a fresh sign-in — an expired or
-    /// rejected token. The settings button is drawn red while this holds.
-    pub fn needs_signin(&self) -> bool {
-        self.issues.iter().any(|i| i.needs_signin)
+    /// Whether any account failed its last poll — the server was unreachable,
+    /// or its token was rejected. Either way the account cannot connect, so
+    /// the settings button is drawn red while this holds.
+    pub fn any_issue(&self) -> bool {
+        !self.issues.is_empty()
     }
 
     /// Start tracking a test for one account, replacing any previous result.

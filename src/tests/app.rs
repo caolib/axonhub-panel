@@ -128,6 +128,25 @@ fn hiding_a_channel_only_drops_that_accounts_rows() {
 }
 
 #[test]
+fn any_issue_covers_every_way_an_account_cannot_connect() {
+    let mut app = App::new(Config::default());
+    assert!(!app.any_issue());
+
+    // An unreachable server keeps its token but still counts as broken.
+    app.issues.push(AccountIssue {
+        id: "a".into(),
+        name: "A".into(),
+        message: "连接失败".into(),
+        needs_signin: false,
+    });
+    assert!(app.any_issue());
+
+    // So does a rejected token.
+    app.issues[0].needs_signin = true;
+    assert!(app.any_issue());
+}
+
+#[test]
 fn model_abbreviations_apply_on_rebuild_and_survive_it() {
     let mut app = App::new(Config::default());
     let mut routed = row(Status::Completed);
