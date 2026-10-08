@@ -119,12 +119,15 @@ fn a_retry_column_without_a_single_retry_is_dropped() {
 }
 
 #[test]
-fn the_retry_dash_is_gray_while_a_real_retry_is_red() {
+fn a_retry_count_is_red_and_its_absence_wears_the_status_colour() {
     let rows = vec![row()];
     let v = view(&rows, &[]);
     let column = Column::Field(DisplayField::Retry);
     assert_eq!(column.text(&rows[0], 0), fmt::DASH);
-    assert_eq!(column.color(&rows[0], &v, &[], &[]), theme::TEXT_DIM);
+    assert_eq!(
+        column.color(&rows[0], &v, &[], &[]),
+        theme::status_color(Status::Completed)
+    );
 
     let mut retried = row();
     retried.attempt_count = 2;
@@ -145,23 +148,78 @@ fn the_status_cell_is_a_dot_coloured_by_state() {
 }
 
 #[test]
-fn cells_fall_back_to_a_dash_instead_of_disappearing() {
-    let empty = row();
+fn the_marks_name_the_flag_and_their_colour_says_whether_it_is_set() {
+    let mut streamed = row();
+    streamed.stream = true;
+    let v = view(&[], &[]);
+    // The character is the column's label — there is no header row — and the
+    // colour carries the value, exactly like the card's 流 / 转 / 透 marks.
+    assert_eq!(Column::Field(DisplayField::Stream).text(&streamed, 0), "流");
     assert_eq!(
-        Column::Field(DisplayField::Caller).text(&empty, 0),
-        fmt::DASH
-    );
-    assert_eq!(Column::Field(DisplayField::Cost).text(&empty, 0), fmt::DASH);
-    assert_eq!(
-        Column::Field(DisplayField::Retry).text(&empty, 0),
-        fmt::DASH
+        Column::Field(DisplayField::Conversion).text(&streamed, 0),
+        "转"
     );
     assert_eq!(
-        Column::Field(DisplayField::Account).text(&empty, 0),
-        fmt::DASH
+        Column::Field(DisplayField::PassThrough).text(&streamed, 0),
+        "透"
     );
+    assert_eq!(
+        Column::Field(DisplayField::Stream).color(&streamed, &v, &[], &[]),
+        theme::WHITE
+    );
+    assert_eq!(
+        Column::Field(DisplayField::PassThrough).color(&streamed, &v, &[], &[]),
+        theme::GRAY
+    );
+}
+
+#[test]
+fn a_cell_without_data_shows_a_dash_in_the_row_status_colour() {
+    // A request still in flight has nothing to report yet: no cache rate, no
+    // speed, no latency. Each of those cells keeps its dash, but the dash
+    // wears the row's status colour instead of the usual grey.
+    let mut pending = row();
+    pending.status = Status::Pending;
+    let v = view(&[], &[]);
+    for field in [
+        DisplayField::Caller,
+        DisplayField::Cost,
+        DisplayField::Retry,
+        DisplayField::Account,
+        DisplayField::Cache,
+        DisplayField::Speed,
+        DisplayField::Latency,
+    ] {
+        let column = Column::Field(field);
+        assert_eq!(column.text(&pending, 0), fmt::DASH, "{field:?} placeholder");
+        assert_eq!(
+            column.color(&pending, &v, &[], &[]),
+            theme::status_color(Status::Pending),
+            "{field:?} placeholder colour"
+        );
+    }
     // The status column always has something to say: its dot.
-    assert_eq!(Column::Status.text(&empty, 0), STATUS_DOT);
+    assert_eq!(Column::Status.text(&pending, 0), STATUS_DOT);
+}
+
+#[test]
+fn data_replaces_the_dash_as_soon_as_it_exists() {
+    let mut done = row();
+    done.status = Status::Completed;
+    done.total_tokens = 12_300;
+    done.latency_ms = Some(190_400);
+    done.total_cost = Some(0.1388);
+    let v = view(&[], &[]);
+    assert_eq!(Column::Field(DisplayField::Tokens).text(&done, 0), "12.3k");
+    assert_eq!(
+        Column::Field(DisplayField::Latency).text(&done, 0),
+        "[3m10s]"
+    );
+    assert_eq!(Column::Field(DisplayField::Cost).text(&done, 0), "$0.1388");
+    assert_eq!(
+        Column::Field(DisplayField::Cost).color(&done, &v, &[], &[]),
+        theme::YELLOW
+    );
 }
 
 #[test]

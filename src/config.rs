@@ -314,7 +314,7 @@ impl DisplayField {
             DisplayField::Channel => "渠道",
             DisplayField::Tokens => "词元 · Token 数",
             DisplayField::Cache => "缓存 · 命中率",
-            DisplayField::Speed => "速度 · tok/s",
+            DisplayField::Speed => "速度 · tps",
             DisplayField::Retry => "重试次数",
             DisplayField::Cost => "费用",
             DisplayField::Latency => "耗时 · [首字·总]",

@@ -36,11 +36,14 @@ const LINE2_H: f32 = 14.0;
 const CARD_RADIUS: f32 = 5.0;
 const ACCENT_W: f32 = 4.0;
 const ACCENT_INSET: f32 = 5.0;
-/// Header filter chips. The width is fixed (widest label 进行中 plus padding),
-/// so click hit-testing needs no font measurement.
-const FILTER_W: f32 = 46.0;
+/// Header filter chips. The width is fixed (one character plus padding), so
+/// click hit-testing needs no font measurement.
+const FILTER_W: f32 = 24.0;
 const FILTER_H: f32 = 20.0;
 const FILTER_GAP: f32 = 4.0;
+/// The settings button, one chip wide so the header reads as one row.
+const SETTINGS_W: f32 = 24.0;
+const SETTINGS_H: f32 = 20.0;
 /// Header id field, sitting just left of the settings button. A full GUID is
 /// wider than this, so the draw keeps the end of the text in view.
 const ID_BOX_W: f32 = 120.0;
@@ -218,7 +221,7 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) -> Opti
 pub fn header_min_width(m: Metrics) -> f32 {
     let s = m.scale;
     let chips = FILTERS.len() as f32 * FILTER_W + (FILTERS.len() - 1) as f32 * FILTER_GAP;
-    (2.0 + chips + 8.0 + ID_BOX_W + 6.0 + 40.0) * s + m.pad() * 2.0
+    (2.0 + chips + 8.0 + ID_BOX_W + 6.0 + SETTINGS_W) * s + m.pad() * 2.0
 }
 
 /// One-pixel outline so the panel separates from whatever is behind it.
@@ -233,10 +236,10 @@ fn draw_edge(p: &Painter, m: Metrics) {
 
 pub fn settings_button(m: Metrics) -> Rect {
     Rect {
-        x: m.width - m.pad() - 40.0 * m.scale,
-        y: (m.header_h - 20.0 * m.scale) / 2.0,
-        w: 40.0 * m.scale,
-        h: 20.0 * m.scale,
+        x: m.width - m.pad() - SETTINGS_W * m.scale,
+        y: (m.header_h - SETTINGS_H * m.scale) / 2.0,
+        w: SETTINGS_W * m.scale,
+        h: SETTINGS_H * m.scale,
     }
 }
 
@@ -292,7 +295,7 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     );
     p.dual_text(
         &fonts.small,
-        "设置",
+        "设",
         settings.x,
         settings.y,
         settings.w,
@@ -323,9 +326,9 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
     let pad = 5.0 * s;
     let inner_w = (id_box.w - pad * 2.0).max(0.0);
     let placeholder = v.id_draft.is_empty() && !v.id_editing;
-    // A full GUID is wider than the box; keep its tail, where the caret sits.
+    // A full model id is wider than the box; keep its tail, where the caret sits.
     let visible = if placeholder {
-        "ID"
+        "model id"
     } else {
         fitting_tail(p, &fonts.small, v.id_draft, inner_w)
     };
@@ -773,7 +776,7 @@ fn draw_card(
     if v.shows(DisplayField::Speed)
         && let Some(tps) = row.tps()
     {
-        let label = format!("{tps:.0} tok/s");
+        let label = format!("{tps:.0} tps");
         let w = p.dual_measure(&fonts.small, &label);
         p.dual_text(
             &fonts.small,
@@ -967,7 +970,7 @@ fn draw_card_single(
     if v.shows(DisplayField::Speed)
         && let Some(tps) = row.tps()
     {
-        let label = format!("{tps:.0} tok/s");
+        let label = format!("{tps:.0} tps");
         let w = p.dual_measure(&fonts.small, &label);
         p.dual_text(
             &fonts.small,

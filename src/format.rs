@@ -27,9 +27,8 @@ pub fn cost(value: f64) -> String {
     }
 }
 
-/// `[456.5s·789.2s]`: time to first token, then total latency. One decimal
-/// always. A missing side is left out, so a request that failed before the
-/// first token reads `[4.5s]`.
+/// `[456.5s·789.2s]`: time to first token, then total latency. A missing side
+/// is left out, so a request that failed before the first token reads `[4.5s]`.
 pub fn latency(total_ms: Option<i64>, first_ms: Option<i64>) -> Option<String> {
     let total = total_ms.filter(|ms| *ms > 0).map(seconds);
     let first = first_ms.filter(|ms| *ms > 0).map(seconds);
@@ -40,8 +39,20 @@ pub fn latency(total_ms: Option<i64>, first_ms: Option<i64>) -> Option<String> {
     }
 }
 
+/// One reading of the latency bracket: `4.5s`, `3m10s`, `1h02m`. The tenth is
+/// what a first token is measured in, so it is kept while the reading is under
+/// a minute; past that it is noise next to a number that long.
 fn seconds(ms: i64) -> String {
-    format!("{:.1}s", ms as f64 / 1000.0)
+    let secs = ms as f64 / 1000.0;
+    if secs < 60.0 {
+        return format!("{secs:.1}s");
+    }
+    let whole = secs.round() as i64;
+    if whole < 3600 {
+        format!("{}m{:02}s", whole / 60, whole % 60)
+    } else {
+        format!("{}h{:02}m", whole / 3600, (whole % 3600) / 60)
+    }
 }
 
 /// Relative age such as `30s` / `2m` / `1h` / `3d`, falling back to an

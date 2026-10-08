@@ -506,7 +506,7 @@ fn timing_text(row: &Row) -> String {
         parts.push(format!("推理 {:.1}s", ms as f64 / 1000.0));
     }
     if let Some(tps) = row.tps() {
-        parts.push(format!("{tps:.0} tok/s"));
+        parts.push(format!("{tps:.0} tps"));
     }
     if parts.is_empty() {
         fmt::DASH.into()

@@ -680,15 +680,16 @@ pub const FILTER_PENDING: FilterMask = 1 << 3;
 pub const FILTER_CANCELED: FilterMask = 1 << 4;
 
 impl Filter {
-    /// Header chip labels.
+    /// Header chip labels: one character each, so the six chips leave the
+    /// header's width to the id field and the subtitle.
     pub fn label(self) -> &'static str {
         match self {
-            Filter::All => "全部",
-            Filter::Completed => "成功",
-            Filter::Failed => "失败",
-            Filter::Active => "进行",
-            Filter::Pending => "等待",
-            Filter::Canceled => "取消",
+            Filter::All => "全",
+            Filter::Completed => "成",
+            Filter::Failed => "败",
+            Filter::Active => "行",
+            Filter::Pending => "等",
+            Filter::Canceled => "消",
         }
     }
 
