@@ -32,7 +32,7 @@ query GetRequests($first: Int, $where: RequestWhereInput, $orderBy: RequestOrder
         metricsFirstTokenLatencyMs
         metricsReasoningDurationMs
         executions(first: 10, orderBy: { field: CREATED_AT, direction: DESC }) {
-          edges { node { modelID status format reasoningEffort passThroughApplied channel { name } } }
+          edges { node { modelID status format reasoningEffort passThroughApplied responseStatusCode channel { name } } }
           totalCount
         }
         usageLogs(first: 1) {

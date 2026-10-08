@@ -84,7 +84,13 @@ impl Column {
                 DisplayField::Tokens => {
                     (row.total_tokens > 0).then(|| fmt::tokens_compact(row.total_tokens))
                 }
-                DisplayField::Cache => row.cache_hit_rate().map(|rate| format!("{rate:.2}%")),
+                // A failed or canceled request has no cache rate to show, so
+                // the cell borrows the space for why it ended there: the HTTP
+                // status of its latest failed attempt.
+                DisplayField::Cache => row
+                    .cache_hit_rate()
+                    .map(|rate| format!("{rate:.2}%"))
+                    .or_else(|| row.error_status_code.map(|code| code.to_string())),
                 DisplayField::Speed => row.tps().map(|tps| format!("{tps:.0} tps")),
                 DisplayField::Retry => {
                     has_retry(row).then(|| format!("{}×", row.attempt_count - 1))
@@ -162,13 +168,13 @@ impl Column {
                     .map(|(_, color)| *color)
                     .unwrap_or(theme::CYAN),
                 DisplayField::Tokens => theme::TEXT_DIM,
-                DisplayField::Cache => {
-                    if row.cache_hit_is_low() {
-                        theme::RED
-                    } else {
-                        theme::GREEN
-                    }
-                }
+                DisplayField::Cache => match row.cache_hit_rate() {
+                    Some(_) if row.cache_hit_is_low() => theme::RED,
+                    Some(_) => theme::GREEN,
+                    // No cache rate: the cell shows the failed attempt's
+                    // status code, which is the reason the request ended.
+                    None => theme::RED,
+                },
                 DisplayField::Speed => theme::TEXT_DIM,
                 // Reached only when a retry count is on screen; a missing one
                 // was answered with the status dot above.

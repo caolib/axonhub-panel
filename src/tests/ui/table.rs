@@ -38,6 +38,7 @@ fn row() -> Row {
         attempt_count: 0,
         failed_attempts: 0,
         attempts_truncated: false,
+        error_status_code: None,
     }
 }
 
@@ -232,4 +233,31 @@ fn a_routed_model_reads_like_the_card_chip() {
         Column::Field(DisplayField::Model).text(&routed, 0),
         "[served(max)]"
     );
+}
+
+#[test]
+fn a_request_without_a_cache_rate_shows_its_failure_code_instead() {
+    // A failed request has no cache rate, so the cell carries why it ended
+    // there: the HTTP status of its latest failed attempt, in red.
+    let mut failed = row();
+    failed.status = Status::Failed;
+    failed.error_status_code = Some(429);
+    let v = view(&[], &[]);
+    let column = Column::Field(DisplayField::Cache);
+    assert_eq!(column.text(&failed, 0), "429");
+    assert_eq!(column.color(&failed, &v, &[], &[]), theme::RED);
+}
+
+#[test]
+fn a_cache_rate_wins_over_the_failure_code() {
+    // A request that recovered after a retry carries both; the cache rate is
+    // the reading that matters, so the code stays hidden.
+    let mut recovered = row();
+    recovered.prompt_tokens = 1_000;
+    recovered.cached_tokens = 800;
+    recovered.error_status_code = Some(500);
+    let v = view(&[], &[]);
+    let column = Column::Field(DisplayField::Cache);
+    assert_eq!(column.text(&recovered, 0), "80.00%");
+    assert_eq!(column.color(&recovered, &v, &[], &[]), theme::GREEN);
 }

@@ -137,6 +137,8 @@ pub struct Execution {
     pub format: Option<String>,
     pub reasoning_effort: Option<String>,
     pub pass_through_applied: Option<bool>,
+    /// HTTP status the upstream provider answered this attempt with.
+    pub response_status_code: Option<i64>,
     pub channel: Option<NamedRef>,
 }
 
@@ -148,6 +150,7 @@ impl Default for Execution {
             format: None,
             reasoning_effort: None,
             pass_through_applied: None,
+            response_status_code: None,
             channel: None,
         }
     }
@@ -352,6 +355,10 @@ pub struct Row {
     /// could hide failures beyond what we fetched. When true, `is_error()` is
     /// conservatively true so the card still opens the detail popup.
     pub attempts_truncated: bool,
+    /// HTTP status the newest failed attempt was answered with. Shown in the
+    /// table's cache column when the request has no cache rate to show — a
+    /// failed request is read for its reason, not for its cache.
+    pub error_status_code: Option<i64>,
 }
 
 impl Row {
@@ -449,6 +456,26 @@ impl Row {
                 .as_ref()
                 .map(|c| c.total_count.unwrap_or(0) > c.edges.len() as i64)
                 .unwrap_or(false),
+            // Attempts arrive newest first, so this is the code of the latest
+            // failed attempt that carries one: what the request ended with, or
+            // the last error seen before it was canceled. A failed attempt
+            // without a code (a timeout, a cancellation) is skipped rather
+            // than blanking the cell.
+            error_status_code: req
+                .executions
+                .as_ref()
+                .and_then(|c| {
+                    c.edges
+                        .iter()
+                        .filter_map(|e| e.node.as_ref())
+                        .filter(|e| {
+                            matches!(
+                                Status::parse(e.status.as_deref()),
+                                Status::Failed | Status::Canceled
+                            )
+                        })
+                        .find_map(|e| e.response_status_code)
+                }),
         }
     }
 

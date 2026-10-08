@@ -33,6 +33,7 @@ fn row(status: Status) -> Row {
         attempt_count: 1,
         failed_attempts: 0,
         attempts_truncated: false,
+        error_status_code: None,
     }
 }
 

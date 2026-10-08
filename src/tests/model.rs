@@ -49,6 +49,7 @@ fn row_with(requested: &str, served: Option<&str>) -> Row {
         attempt_count: 0,
         failed_attempts: 0,
         attempts_truncated: false,
+        error_status_code: None,
     }
 }
 
@@ -253,6 +254,60 @@ fn a_request_that_recovered_after_a_failure_is_still_trouble() {
     assert_eq!(row.attempt_count, 2);
     assert_eq!(row.failed_attempts, 1);
     assert!(row.is_error(), "a failed attempt makes the card clickable");
+}
+
+#[test]
+fn the_latest_failed_attempts_status_code_is_kept() {
+    // Attempts arrive newest first: the code kept for the table is the newest
+    // failure's, so a retried request reports what it ended with rather than
+    // what it started with, and a success's 200 is never picked up.
+    let req = wire_request(
+        r#"{
+          "id": "gid://axonhub/Request/5",
+          "status": "failed",
+          "modelID": "glm-5.2",
+          "executions": { "totalCount": 3, "edges": [
+            { "node": { "status": "failed", "responseStatusCode": 500 } },
+            { "node": { "status": "failed", "responseStatusCode": 429 } },
+            { "node": { "status": "completed", "responseStatusCode": 200 } }
+          ] }
+        }"#,
+    );
+    let row = Row::from_wire(&req);
+    assert_eq!(row.error_status_code, Some(500));
+}
+
+#[test]
+fn a_failure_without_a_code_falls_back_to_the_last_one_that_has_it() {
+    // A cancellation carries no code of its own; the cell shows the last
+    // error seen instead of going blank.
+    let req = wire_request(
+        r#"{
+          "id": "gid://axonhub/Request/6",
+          "status": "canceled",
+          "modelID": "glm-5.2",
+          "executions": { "totalCount": 2, "edges": [
+            { "node": { "status": "canceled" } },
+            { "node": { "status": "failed", "responseStatusCode": 429 } }
+          ] }
+        }"#,
+    );
+    let row = Row::from_wire(&req);
+    assert_eq!(row.error_status_code, Some(429));
+
+    // No failed attempt at all: nothing to show.
+    let req = wire_request(
+        r#"{
+          "id": "gid://axonhub/Request/7",
+          "status": "completed",
+          "modelID": "glm-5.2",
+          "executions": { "totalCount": 1, "edges": [
+            { "node": { "status": "completed", "responseStatusCode": 200 } }
+          ] }
+        }"#,
+    );
+    let row = Row::from_wire(&req);
+    assert_eq!(row.error_status_code, None);
 }
 
 #[test]

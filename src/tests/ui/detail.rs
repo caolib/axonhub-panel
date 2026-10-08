@@ -86,6 +86,7 @@ fn row() -> Row {
         attempt_count: 2,
         failed_attempts: 1,
         attempts_truncated: false,
+        error_status_code: Some(429),
     }
 }
 
