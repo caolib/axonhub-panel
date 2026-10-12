@@ -160,8 +160,20 @@ pub struct Client {
 
 impl Client {
     pub fn new(timeout: Duration) -> Self {
+        // Windows-only: TLS goes through schannel and the Windows trust store, so
+        // an AxonHub behind an enterprise CA or a TLS-terminating proxy validates
+        // the same way a browser does. Two things are load-bearing here: the
+        // `native-tls` feature is what compiles a provider in at all (the
+        // dependency turns default features off), and `TlsConfig` defaults to
+        // Rustls/WebPki, so both the provider and the root store must be named
+        // explicitly — omitting either leaves https broken.
+        let tls = ureq::tls::TlsConfig::builder()
+            .provider(ureq::tls::TlsProvider::NativeTls)
+            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+            .build();
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
+            .tls_config(tls)
             .build();
         Client {
             agent: config.new_agent(),
@@ -366,7 +378,14 @@ fn map_transport(err: ureq::Error, auth: bool) -> ApiError {
             warn!("连接 AxonHub 超时");
             ApiError::Unreachable("连接超时".into())
         }
-        // 非状态类传输错误：网络抖动、DNS、TLS 失败等。错误串不含任何凭据。
+        // TLS failures get their own message: the raw error is an OS string
+        // (`os error -2146762487`) that tells a Chinese-speaking user nothing
+        // about what to check.
+        ureq::Error::Tls(_) | ureq::Error::NativeTls(_) => {
+            warn!("TLS 握手失败(auth={auth}): {err}");
+            ApiError::Unreachable("TLS 握手失败:证书不受信任或已过期".into())
+        }
+        // 非状态类传输错误：网络抖动、DNS 等。错误串不含任何凭据。
         other => {
             warn!("传输层错误(auth={auth}): {other}");
             ApiError::Unreachable(other.to_string())
