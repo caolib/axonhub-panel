@@ -66,7 +66,6 @@ pub struct App {
     pub scroll: f32,
     pub hover: Option<usize>,
     pub selected: Option<usize>,
-    pub user_name: Option<String>,
     /// Transient status line; `true` marks an error presentation.
     pub status: Option<(String, bool)>,
     pub login: Option<LoginForm>,
@@ -97,7 +96,6 @@ impl App {
             scroll: 0.0,
             hover: None,
             selected: None,
-            user_name: None,
             status: None,
             login: None,
             open_accounts: Vec::new(),
@@ -120,6 +118,13 @@ impl App {
         };
         let mode = self.config.credential_mode;
         let mut form = form.unwrap_or_else(|| LoginForm::adding(&self.config.endpoint, mode));
+        // Prefill the saved email when there is one: a re-sign-in after expiry
+        // should only need the password.
+        if let LoginTarget::Account(id) = &target
+            && let Some(account) = self.stored.account(id)
+        {
+            form.email = account.email.clone();
+        }
         form.error = message;
         self.login = Some(form);
         self.view = View::Login;
@@ -161,37 +166,48 @@ impl App {
     pub fn apply_updates(&mut self, updates: Vec<Update>) {
         for update in updates {
             match update {
-                Update::SignedIn { token, user } => {
+                Update::SignedIn {
+                    account,
+                    creds,
+                    token,
+                    user,
+                } => {
                     let project =
                         crate::client::resolve_project(&user.user, &self.config.project_id);
                     if !project.is_empty() {
                         self.config.project_id = project;
                     }
-                    self.user_name = Some(user.user.display_name());
                     self.view = View::List;
                     self.status = Some(("已登录".into(), false));
                     info!("登录成功");
 
-                    // Record the freshly issued token: the account the form was
-                    // editing, or the legacy single-account slot. The worker
-                    // already holds it for the target it signed in.
-                    let (email, password) = self
-                        .login
-                        .as_ref()
-                        .map(|f| (f.email.trim().to_string(), f.password.clone()))
-                        .unwrap_or_default();
-                    let password = (!password.is_empty()).then_some(password);
+                    // Record the freshly issued token against the account that
+                    // signed in, and its password beside it. `store` strips the
+                    // password unless the selected mode allows one.
                     let mut stored = self.stored.clone();
-                    stored.email = email;
-                    stored.password = password;
-                    match self.login.as_ref().and_then(|f| f.editing.clone()) {
-                        Some(id) => stored.set_token(&id, &token),
-                        None => stored.token = Some(token),
-                    }
+                    stored.set_token(&account, &token);
+                    stored.set_credentials(&account, &creds);
                     self.stored = stored.clone();
                     self.config.store(&stored);
                     self.accounts = self.config.accounts.clone();
                     self.save();
+                }
+                Update::TokenRefreshed {
+                    account,
+                    token,
+                    project_id,
+                } => {
+                    // Silent renewal: no view or status change, so a form the
+                    // user is filling in is not yanked away.
+                    if let Some(saved) = self.config.accounts.iter_mut().find(|a| a.id == account) {
+                        saved.project_id = project_id;
+                    }
+                    let mut stored = self.stored.clone();
+                    stored.set_token(&account, &token);
+                    self.stored = stored.clone();
+                    self.config.store(&stored);
+                    self.save();
+                    info!("账号 {} 的令牌已自动刷新", account);
                 }
                 Update::Snapshot { rows, .. } => {
                     self.axon_rows = rows;
@@ -205,8 +221,10 @@ impl App {
                     // server) keep their token and recover on their own.
                     for issue in &broken {
                         if issue.needs_signin {
+                            // Drop only the rejected token: a saved password
+                            // must survive so renewal can still use it.
                             let mut stored = self.stored.clone();
-                            stored.forget_account(&issue.id);
+                            stored.clear_token(&issue.id);
                             self.stored = stored.clone();
                             self.config.store(&stored);
                         }
@@ -233,11 +251,11 @@ impl App {
                     // The login view does not render the status line, so a failed
                     // sign-in has to surface on the form itself. Clearing `busy`
                     // is what lets the user correct their input and retry.
-                    if self.is_login() {
-                        if let Some(form) = self.login.as_mut() {
-                            form.busy = false;
-                            form.error = Some(err.message());
-                        }
+                    if self.is_login()
+                        && let Some(form) = self.login.as_mut()
+                    {
+                        form.busy = false;
+                        form.error = Some(err.message());
                     }
                     self.status = Some((err.message(), true));
                 }

@@ -26,9 +26,7 @@ pub const MAUVE: u32 = 0xFFC4_A0E0;
 /// to find at a glance.
 pub const INPUT_BG: u32 = 0xFF0D_1016;
 pub const INPUT_BORDER: u32 = 0xFF34_3C4A;
-/// Selected tab: a raised surface with the accent border. Unused while the
-/// method tabs are hidden, kept for when the password method returns.
-#[allow(dead_code)]
+/// Selected tab: a raised surface with the accent border.
 pub const TAB_ON: u32 = 0xFF2E_3745;
 /// Highlight behind selected text; translucent so the glyphs stay readable.
 pub const SELECTION: u32 = 0x59_C4_A0_E0;

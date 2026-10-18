@@ -97,10 +97,8 @@ pub struct SignInResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
-    pub email: Option<String>,
-    pub first_name: Option<String>,
-    pub last_name: Option<String>,
-    /// Per-project memberships; used to validate the configured project.
+    /// Per-project memberships; used to validate the configured project. The
+    /// rest of the identity is not shown anywhere, so it is not deserialized.
     #[serde(default)]
     pub projects: Vec<UserProject>,
 }
@@ -109,21 +107,6 @@ pub struct UserInfo {
 #[serde(rename_all = "camelCase")]
 pub struct UserProject {
     pub project_id: Option<String>,
-}
-
-impl UserInfo {
-    pub fn display_name(&self) -> String {
-        let full = format!(
-            "{} {}",
-            self.first_name.as_deref().unwrap_or("").trim(),
-            self.last_name.as_deref().unwrap_or("").trim()
-        );
-        let full = full.trim();
-        if !full.is_empty() {
-            return full.to_string();
-        }
-        self.email.clone().unwrap_or_else(|| "未知用户".into())
-    }
 }
 
 /// Every failure the panel can show the user, with the message already

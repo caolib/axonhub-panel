@@ -2,12 +2,12 @@
 //!
 //! Three credential modes, all stored under DPAPI (current Windows user):
 //!
-//! * `None`     — nothing is written; the password is asked for on every launch.
+//! * `None`     — nothing is written; credentials are asked for on every launch.
 //! * `Token`    — only the JWT is stored, never the password. The token is valid
 //!                for the lifetime AxonHub issued it for (7 days), after which
 //!                the sign-in form appears again.
-//! * `Password` — the email and password are stored so sign-in is silent and
-//!                never expires. Convenient, but the password is on disk.
+//! * `Password` — the email and password are stored so expired tokens can be
+//!                renewed by signing in again. The password is encrypted on disk.
 
 use std::path::{Path, PathBuf};
 
@@ -36,9 +36,9 @@ impl CredentialMode {
     /// One-line explanation shown under the selector.
     pub fn hint(self) -> &'static str {
         match self {
-            CredentialMode::None => "每次启动都需要重新输入访问令牌",
-            CredentialMode::Token => "仅加密保存访问令牌,不保存密码;7 天后需重新登录",
-            CredentialMode::Password => "加密保存邮箱和密码,自动登录,不会过期",
+            CredentialMode::None => "每次启动都需要重新登录",
+            CredentialMode::Token => "仅加密保存令牌;过期后需手动登录",
+            CredentialMode::Password => "加密保存邮箱和密码;令牌过期后自动重登",
         }
     }
 }
@@ -362,9 +362,49 @@ impl Stored {
         entry.token = (!token.is_empty()).then(|| token.to_string());
     }
 
+    /// Password credentials usable for automatic sign-in. Empty fields are
+    /// not credentials, and passwords keep their whitespace verbatim.
+    pub fn credentials_for(&self, id: &str) -> Option<Credentials> {
+        let account = self.account(id)?;
+        let password = account.password.as_ref().filter(|p| !p.is_empty())?;
+        let email = account.email.trim();
+        if email.is_empty() {
+            return None;
+        }
+        Some(Credentials {
+            email: email.to_string(),
+            password: password.clone(),
+        })
+    }
+
     /// Forget one account's secrets.
     pub fn forget_account(&mut self, id: &str) {
         self.accounts.retain(|a| a.id != id);
+    }
+
+    /// Drop only the rejected token. A saved password survives, which is what
+    /// lets the worker sign in again instead of demanding the password anew.
+    pub fn clear_token(&mut self, id: &str) {
+        if let Some(account) = self.accounts.iter_mut().find(|a| a.id == id) {
+            account.token = None;
+        }
+    }
+
+    /// Replace one account's password credentials. The mode decides whether
+    /// they ever reach the disk.
+    pub fn set_credentials(&mut self, id: &str, creds: &Credentials) {
+        let entry = match self.accounts.iter_mut().find(|a| a.id == id) {
+            Some(slot) => slot,
+            None => {
+                self.accounts.push(StoredAccount {
+                    id: id.to_string(),
+                    ..Default::default()
+                });
+                self.accounts.last_mut().expect("just pushed")
+            }
+        };
+        entry.email = creds.email.clone();
+        entry.password = Some(creds.password.clone());
     }
 }
 

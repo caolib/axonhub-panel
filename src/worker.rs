@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use crate::client::{ApiError, Client, SignInResponse};
-use crate::config::{Config, Credentials};
+use crate::config::{Account, Config, CredentialMode, Credentials, Stored};
 use crate::model::{ExecutionDetail, Row};
 use tracing::warn;
 
@@ -28,8 +28,16 @@ const TICK: Duration = Duration::from_millis(200);
 pub enum Update {
     /// Sign-in succeeded; the token and identity are already validated.
     SignedIn {
+        account: String,
+        creds: Credentials,
         token: String,
         user: Box<SignInResponse>,
+    },
+    /// Silent renewal only updates credentials; it must not dismiss a form.
+    TokenRefreshed {
+        account: String,
+        token: String,
+        project_id: String,
     },
     /// A fresh page of AxonHub requests, merged across every account.
     Snapshot {
@@ -74,9 +82,155 @@ pub struct Target {
     pub endpoint: String,
     pub project_id: String,
     pub token: Option<String>,
+    credentials: Option<Credentials>,
+    allow_password: bool,
+    auth_blocked: bool,
+    auth_retry_at: Option<Instant>,
+    auth_backoff: Duration,
+    auth_error: Option<ApiError>,
 }
 
 impl Target {
+    pub fn from_account(account: &Account, stored: &Stored, mode: CredentialMode) -> Self {
+        // The mode is the permission, not the presence of a field: a blob left
+        // from password mode must not be used after the user downgrades.
+        let allow_password = mode == CredentialMode::Password;
+        Target {
+            id: account.id.clone(),
+            name: account.name.clone(),
+            endpoint: account.endpoint.clone(),
+            project_id: account.project_id.clone(),
+            token: stored.token_for(&account.id).filter(|t| !t.is_empty()),
+            credentials: allow_password
+                .then(|| stored.credentials_for(&account.id))
+                .flatten(),
+            allow_password,
+            auth_blocked: false,
+            auth_retry_at: None,
+            auth_backoff: Duration::ZERO,
+            auth_error: None,
+        }
+    }
+
+    pub fn can_authenticate(&self) -> bool {
+        !self.auth_blocked && (self.token.is_some() || self.credentials.is_some())
+    }
+
+    /// A password typed into the form is usable right away, even when the
+    /// persisted mode is token-only; it just is not written to disk, so it only
+    /// enables renewal for this session.
+    pub fn set_credentials(&mut self, creds: Credentials) {
+        self.credentials = Some(creds);
+        self.allow_password = true;
+        self.auth_blocked = false;
+        self.auth_retry_at = None;
+        self.auth_backoff = Duration::ZERO;
+        self.auth_error = None;
+    }
+
+    /// A downgrade to token-only drops the in-memory password and stops any
+    /// silent renewal that was in flight.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_allow_password(&mut self, allow: bool) {
+        self.allow_password = allow;
+        if !allow {
+            self.credentials = None;
+            self.auth_blocked = false;
+            self.auth_retry_at = None;
+            self.auth_error = None;
+        }
+    }
+
+    fn accept_signin(&mut self, response: &SignInResponse) {
+        self.token = Some(response.token.clone());
+        self.project_id = crate::client::resolve_project(&response.user, &self.project_id);
+        self.auth_blocked = false;
+        self.auth_retry_at = None;
+        self.auth_backoff = Duration::ZERO;
+        self.auth_error = None;
+    }
+
+    fn renew(
+        &mut self,
+        signin: &mut impl FnMut(&Credentials) -> Result<SignInResponse, ApiError>,
+        updates: &Sender<Update>,
+        now: Instant,
+    ) -> Result<(), ApiError> {
+        if self.auth_blocked {
+            return Err(ApiError::Unauthorized);
+        }
+        if self.auth_retry_at.is_some_and(|retry| now < retry) {
+            return Err(self.auth_error.clone().unwrap_or(ApiError::Unauthorized));
+        }
+        if !self.allow_password {
+            return Err(ApiError::Unauthorized);
+        }
+        let creds = self.credentials.as_ref().ok_or(ApiError::Unauthorized)?;
+        match signin(creds) {
+            Ok(response) => {
+                self.accept_signin(&response);
+                let _ = updates.send(Update::TokenRefreshed {
+                    account: self.id.clone(),
+                    token: response.token,
+                    project_id: self.project_id.clone(),
+                });
+                Ok(())
+            }
+            Err(err) => {
+                // Only a rejected password is permanent. A timeout or a 5xx is
+                // transient, so retry it later with a growing delay.
+                self.auth_blocked = err.needs_signin();
+                self.auth_backoff = next_backoff(self.auth_backoff);
+                self.auth_retry_at = Some(now + self.auth_backoff);
+                self.auth_error = Some(err.clone());
+                Err(err)
+            }
+        }
+    }
+
+    /// Check expiry before a query, then retry a rejected token exactly once.
+    /// Sign-in and query closures keep this policy testable without a network.
+    fn authorized<T>(
+        &mut self,
+        mut signin: impl FnMut(&Credentials) -> Result<SignInResponse, ApiError>,
+        mut query: impl FnMut(&Target, &str) -> Result<T, ApiError>,
+        updates: &Sender<Update>,
+        now_unix: i64,
+        now: Instant,
+    ) -> Result<T, ApiError> {
+        if self.auth_blocked {
+            return Err(ApiError::Unauthorized);
+        }
+        let needs_token = self
+            .token
+            .as_ref()
+            .is_none_or(|token| crate::token::is_expired(token, now_unix));
+        let mut renewed = false;
+        if needs_token {
+            self.token = None;
+            self.renew(&mut signin, updates, now)?;
+            renewed = true;
+        }
+        let token = self.token.clone().ok_or(ApiError::Unauthorized)?;
+        let result = query(self, &token);
+        if result.as_ref().is_err_and(|err| err.needs_signin()) {
+            self.token = None;
+            if renewed || self.credentials.is_none() {
+                self.auth_blocked = true;
+                return result;
+            }
+            self.renew(&mut signin, updates, now)?;
+            let token = self.token.clone().ok_or(ApiError::Unauthorized)?;
+            let result = query(self, &token);
+            if result.as_ref().is_err_and(|err| err.needs_signin()) {
+                self.token = None;
+                self.auth_blocked = true;
+            }
+            return result;
+        }
+        result
+    }
+
     fn graphql_url(&self) -> String {
         format!("{}/admin/graphql", self.endpoint.trim_end_matches('/'))
     }
@@ -177,6 +331,25 @@ struct Cycle {
     open: Vec<String>,
     /// Accounts that failed, with a short reason.
     broken: Vec<AccountIssue>,
+}
+
+/// The worker's poll list: one target per saved account, with whatever token
+/// the encrypted blob holds for it and, in password mode, its saved password.
+pub fn targets_from(config: &Config, stored: &Stored) -> Vec<Target> {
+    config
+        .accounts
+        .iter()
+        .map(|account| Target::from_account(account, stored, config.credential_mode))
+        .collect()
+}
+
+/// Shared exponential retry cadence, bounded even when another account works.
+fn next_backoff(previous: Duration) -> Duration {
+    if previous.is_zero() {
+        Duration::from_secs(2)
+    } else {
+        (previous * 2).min(Duration::from_secs(30))
+    }
 }
 
 /// Apply one command to the worker's live state. Returns `true` when the
@@ -287,13 +460,27 @@ fn run(
                 .find(|t| t.id == account)
                 .and_then(|t| t.token.clone())
             {
-                Some(current) => {
-                    let target = targets.iter().find(|t| t.id == account).expect("checked");
-                    detail_client.fetch_request_executions(
-                        &target.graphql_url(),
-                        &current,
-                        &target.project_id,
-                        &id,
+                Some(_) => {
+                    let target = targets
+                        .iter_mut()
+                        .find(|t| t.id == account)
+                        .expect("checked");
+                    let signin_url = target.signin_url();
+                    let graphql_url = target.graphql_url();
+                    let project_id = target.project_id.clone();
+                    target.authorized(
+                        |creds| signin_client.sign_in(&signin_url, &creds.email, &creds.password),
+                        |_target, current| {
+                            detail_client.fetch_request_executions(
+                                &graphql_url,
+                                current,
+                                &project_id,
+                                &id,
+                            )
+                        },
+                        &updates,
+                        crate::time::now_unix(),
+                        Instant::now(),
                     )
                 }
                 None => Err(ApiError::Unauthorized),
@@ -308,16 +495,28 @@ fn run(
         // answer, and the test is a single request. A token the poll already
         // dropped counts as "no credentials" rather than a failed round trip.
         if let Some(account) = pending_probe.take() {
-            let target = targets.iter().find(|t| t.id == account);
-            let result = match target.and_then(|t| t.token.clone()) {
-                Some(token) => {
-                    let target = target.expect("checked");
-                    client
-                        .fetch_requests(&target.graphql_url(), &token, &target.project_id, 1)
-                        .map(|(_, total)| total)
+            let result = match targets.iter_mut().find(|t| t.id == account) {
+                Some(target) if target.can_authenticate() => {
+                    let signin_url = target.signin_url();
+                    let graphql_url = target.graphql_url();
+                    let project_id = target.project_id.clone();
+                    target
+                        .authorized(
+                            |creds| {
+                                signin_client.sign_in(&signin_url, &creds.email, &creds.password)
+                            },
+                            |_target, token| {
+                                client
+                                    .fetch_requests(&graphql_url, token, &project_id, 1)
+                                    .map(|(_, total)| total)
+                            },
+                            &updates,
+                            crate::time::now_unix(),
+                            Instant::now(),
+                        )
                         .map_err(|e| e.message())
                 }
-                None => Err("该账号没有可用凭据，请重新登录".into()),
+                _ => Err("该账号没有可用凭据，请重新登录".into()),
             };
             if let Err(message) = &result {
                 warn!("测试账号失败 ({}): {}", account, message);
@@ -334,22 +533,30 @@ fn run(
                 .find(|t| t.id == account)
                 .map(Target::signin_url);
             match signin_url {
-                Some(url) => match signin_client.sign_in(&url, &creds.email, &creds.password) {
-                    Ok(response) => {
-                        if let Some(target) = targets.iter_mut().find(|t| t.id == account) {
-                            target.token = Some(response.token.clone());
+                Some(url) => {
+                    let result = signin_client.sign_in(&url, &creds.email, &creds.password);
+                    match result {
+                        Ok(response) => {
+                            if let Some(target) = targets.iter_mut().find(|t| t.id == account) {
+                                target.accept_signin(&response);
+                                // A password entered by hand may sign in even
+                                // when it is not persisted; use it for renewal.
+                                target.set_credentials(creds.clone());
+                            }
+                            backoff = Duration::ZERO;
+                            let _ = updates.send(Update::SignedIn {
+                                account: account.clone(),
+                                creds,
+                                token: response.token.clone(),
+                                user: Box::new(response),
+                            });
                         }
-                        backoff = Duration::ZERO;
-                        let _ = updates.send(Update::SignedIn {
-                            token: response.token.clone(),
-                            user: Box::new(response),
-                        });
+                        Err(err) => {
+                            warn!("登录失败: {}", err.message());
+                            let _ = updates.send(Update::Failed(err));
+                        }
                     }
-                    Err(err) => {
-                        warn!("登录失败: {}", err.message());
-                        let _ = updates.send(Update::Failed(err));
-                    }
-                },
+                }
                 None => {
                     let _ = updates.send(Update::Failed(ApiError::Unauthorized));
                 }
@@ -363,9 +570,12 @@ fn run(
             let mut cycle = Cycle::default();
             let mut polled = false;
 
+            let statuses: Option<Vec<&str>> = status_filter
+                .as_ref()
+                .map(|values| values.iter().map(String::as_str).collect());
             for target in targets.iter_mut() {
-                let Some(token) = target.token.clone() else {
-                    // Without a token the account is skipped below and would
+                if !target.can_authenticate() {
+                    // Without credentials the account is skipped below and would
                     // fall out of the health report, wiping the red settings
                     // button while the account is still unusable. Keep it in
                     // the broken list until it signs in again.
@@ -376,18 +586,26 @@ fn run(
                         needs_signin: true,
                     });
                     continue;
-                };
+                }
                 polled = true;
-                let statuses: Option<Vec<&str>> = status_filter
-                    .as_ref()
-                    .map(|values| values.iter().map(String::as_str).collect());
-                match client.fetch_requests_where(
-                    &target.graphql_url(),
-                    &token,
-                    &target.project_id,
-                    config.row_limit,
-                    id_filter.as_deref(),
-                    statuses.as_deref(),
+                let signin_url = target.signin_url();
+                let graphql_url = target.graphql_url();
+                let project_id = target.project_id.clone();
+                match target.authorized(
+                    |creds| signin_client.sign_in(&signin_url, &creds.email, &creds.password),
+                    |_target, token| {
+                        client.fetch_requests_where(
+                            &graphql_url,
+                            token,
+                            &project_id,
+                            config.row_limit,
+                            id_filter.as_deref(),
+                            statuses.as_deref(),
+                        )
+                    },
+                    &updates,
+                    crate::time::now_unix(),
+                    Instant::now(),
                 ) {
                     Ok((requests, _total)) => {
                         cycle.rows.extend(
@@ -403,18 +621,11 @@ fn run(
                             target.name,
                             err.message()
                         );
-                        let needs_signin = err.needs_signin();
-                        if needs_signin {
-                            // The token is worse than useless: drop it so the
-                            // next cycle does not keep retrying it, and let the
-                            // UI offer a re-sign-in for this account.
-                            target.token = None;
-                        }
                         cycle.broken.push(AccountIssue {
                             id: target.id.clone(),
                             name: target.name.clone(),
                             message: err.message(),
-                            needs_signin,
+                            needs_signin: err.needs_signin(),
                         });
                     }
                 }
@@ -455,7 +666,18 @@ fn run(
                 reported = Some(health);
             }
 
-            let interval = if !backoff.is_zero() {
+            // A failed renewal has its own (short) retry delay. Waiting the full
+            // poll interval would leave the account dark for up to 30s after a
+            // blip, even though the password was never rejected.
+            let auth_retry = targets
+                .iter()
+                .filter(|t| !t.auth_blocked && t.credentials.is_some() && t.token.is_none())
+                .filter_map(|t| t.auth_retry_at)
+                .min()
+                .map(|at| at.saturating_duration_since(Instant::now()));
+            let interval = if let Some(retry) = auth_retry {
+                retry.max(Duration::from_secs(1))
+            } else if !backoff.is_zero() {
                 backoff
             } else {
                 let secs = if any_active {
@@ -500,3 +722,7 @@ fn run(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/worker.rs"]
+mod tests;

@@ -98,6 +98,58 @@ fn a_token_mode_without_a_token_does_not_leave_a_stale_blob() {
 }
 
 #[test]
+fn account_credentials_are_stored_per_account_and_stripped_by_token_mode() {
+    let dir = Scratch::new("per-account");
+    let creds = Credentials {
+        email: " a@b ".into(),
+        password: " p w ".into(),
+    };
+    let mut stored = Stored::default();
+    stored.set_token("a1", "tok");
+    stored.set_credentials("a1", &creds);
+
+    // The password is kept verbatim, the email is trimmed when read.
+    let got = stored.credentials_for("a1").expect("credentials");
+    assert_eq!(got.email, "a@b");
+    assert_eq!(got.password, " p w ");
+    assert!(stored.credentials_for("a2").is_none());
+
+    dir.store(CredentialMode::Password, &stored);
+    let back = dir.load().expect("stored");
+    assert_eq!(
+        back.account("a1").unwrap().password.as_deref(),
+        Some(" p w ")
+    );
+
+    // A downgrade to token mode drops every account's password.
+    dir.store(CredentialMode::Token, &stored);
+    let back = dir.load().expect("token still stored");
+    assert!(back.account("a1").unwrap().password.is_none());
+    assert_eq!(back.token_for("a1").as_deref(), Some("tok"));
+}
+
+#[test]
+fn clearing_a_rejected_token_keeps_the_password() {
+    let mut stored = Stored::default();
+    stored.set_credentials(
+        "a1",
+        &Credentials {
+            email: "a@b".into(),
+            password: "secret".into(),
+        },
+    );
+    stored.set_token("a1", "tok");
+
+    stored.clear_token("a1");
+    assert_eq!(stored.token_for("a1"), None);
+    assert_eq!(
+        stored.credentials_for("a1").unwrap().password,
+        "secret",
+        "the saved password is what enables automatic renewal"
+    );
+}
+
+#[test]
 fn config_round_trips_through_disk() {
     // Config::save/load use the process-wide directory, so drive the serde
     // layer directly here to keep the test isolated.

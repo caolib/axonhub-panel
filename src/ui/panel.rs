@@ -170,7 +170,6 @@ pub struct ListView<'a> {
     pub hover: Option<usize>,
     pub selected: Option<usize>,
     pub status_text: Option<(String, bool)>,
-    pub user: Option<&'a str>,
     /// Saved accounts; more than one means every card is tagged with its own.
     pub accounts: &'a [Account],
     /// An account did not answer the last poll — the server is unreachable or
@@ -429,11 +428,8 @@ fn draw_header(p: &Painter, fonts: &theme::Fonts, m: Metrics, v: &ListView) {
 
     let (text, color) = match &v.status_text {
         Some((message, true)) => (message.clone(), theme::RED),
-        Some((message, false)) => match v.user {
-            Some(user) => (format!("{user}  ·  {message}"), theme::GREEN),
-            None => (message.clone(), theme::GREEN),
-        },
-        None => (v.user.unwrap_or_default().to_string(), theme::TEXT_FAINT),
+        Some((message, false)) => (message.clone(), theme::GREEN),
+        None => (String::new(), theme::TEXT_FAINT),
     };
     p.dual_text(
         &fonts.small,

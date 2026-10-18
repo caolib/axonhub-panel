@@ -592,13 +592,16 @@ fn main() {
             config.store(&stored);
         }
 
-        let targets = targets_from(&config, &stored);
+        let targets = worker::targets_from(&config, &stored);
 
         // An expired token is a routine event (AxonHub issues 7-day tokens with
-        // no refresh), so say so rather than letting the first poll 401.
+        // no refresh), so say so rather than letting the first poll 401. With a
+        // saved password the worker renews silently, so only token-only accounts
+        // need the notice.
         let expired_notice = config
             .accounts
             .iter()
+            .filter(|_| config.credential_mode != CredentialMode::Password)
             .find(|a| {
                 stored
                     .token_for(&a.id)
@@ -645,7 +648,7 @@ fn main() {
 
         let mut app = App::new(config.clone());
         app.stored = stored.clone();
-        if !targets.iter().any(|t| t.token.is_some()) {
+        if !targets.iter().any(Target::can_authenticate) {
             // No account can be polled: collect a token. An existing account is
             // re-signed-in from its own form; a fresh install starts on a new
             // one.
@@ -771,8 +774,14 @@ fn main() {
         let work = work_area_for(hwnd);
         let mode = config.layout_mode();
         let width = ui::layout::device_px(logical_width, scale);
-        let height = ui::layout::height_for_rows(config.row_limit.max(1) as usize, scale, mode)
-            .min(work.3 - work.1);
+        // The password form is taller than a short list window; size the
+        // window to the form on first launch so every field is visible.
+        let height = if wants_focus {
+            ui::login::window_height(scale)
+        } else {
+            ui::layout::height_for_rows(config.row_limit.max(1) as usize, scale, mode)
+        }
+        .min(work.3 - work.1);
         let (x, y) = if saved.x < 0 && saved.y < 0 {
             // First run: pin to the top-right of the primary work area now that
             // the real width is known.
@@ -1414,6 +1423,9 @@ enum Action {
     ReturnToSettings,
     /// Sign in with the credentials currently in the form.
     SignIn,
+    /// Resize the panel so the sign-in form fits (it is taller than a short
+    /// list window), or back to the saved list geometry.
+    FitLogin(bool),
     OpenUrl(String),
     /// Apply an always-on-top change to the live window.
     SetTopmost(bool),
@@ -1482,6 +1494,16 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
             }
             Action::ReturnToSettings => settings_window::finish_login(hwnd, true),
             Action::SignIn => submit_login(hwnd),
+            Action::FitLogin(true) => {
+                if State::with(|s| s.settings_login.is_none()).unwrap_or(false) {
+                    fit_login_window(hwnd);
+                }
+            }
+            Action::FitLogin(false) => {
+                if State::with(|s| s.settings_login.is_none()).unwrap_or(false) {
+                    restore_list_window(hwnd);
+                }
+            }
             Action::OpenUrl(url) => open_url_async(&url),
             Action::SetTopmost(on) => {
                 let insert_after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
@@ -1821,6 +1843,88 @@ fn save_window_state(hwnd: HWND) {
     });
 }
 
+/// Make the window tall enough for the sign-in form without writing that
+/// temporary height to the saved list geometry.
+fn fit_login_window(hwnd: HWND) {
+    let scale = window_scale(hwnd);
+    let work = work_area_for(hwnd);
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut rc);
+    }
+    let height = ui::login::window_height(scale).min(work.3 - work.1);
+    if (rc.bottom - rc.top) >= height {
+        return;
+    }
+    let placed = config::clamp_to_virtual_screen(
+        WindowState {
+            x: rc.left,
+            y: rc.top,
+            width: rc.right - rc.left,
+            height,
+        },
+        work,
+        scale,
+        layout_mode(),
+    );
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            placed.x,
+            placed.y,
+            placed.width,
+            placed.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    invalidate(hwnd);
+}
+
+/// Return to the saved list size after the sign-in form. `save_window_state`
+/// kept the list geometry while the form was up, so it is still the truth.
+fn restore_list_window(hwnd: HWND) {
+    let (rows, logical_width) = State::with(|s| {
+        (
+            s.app.config.row_limit.max(1) as usize,
+            s.app.config.window.width.max(320),
+        )
+    })
+    .unwrap_or((config::DEFAULT_ROWS, 452));
+    let scale = window_scale(hwnd);
+    let work = work_area_for(hwnd);
+    let mode = layout_mode();
+    let height = ui::layout::height_for_rows(rows, scale, mode).min(work.3 - work.1);
+    let width = ui::layout::device_px(logical_width, scale);
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut rc);
+    }
+    let placed = config::clamp_to_virtual_screen(
+        WindowState {
+            x: rc.left,
+            y: rc.top,
+            width,
+            height,
+        },
+        work,
+        scale,
+        mode,
+    );
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            placed.x,
+            placed.y,
+            placed.width,
+            placed.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    invalidate(hwnd);
+}
+
 /// One character typed into the header box. Long enough for a full request
 /// GUID; control characters never reach here.
 fn type_id_char(app: &mut App, ch: char) -> bool {
@@ -1915,7 +2019,6 @@ fn paint(hwnd: HWND) -> Option<i32> {
                         hover: s.app.hover,
                         selected: s.app.selected,
                         status_text: s.app.status.clone(),
-                        user: s.app.user_name.as_deref(),
                         accounts: &s.app.accounts,
                         settings_alert: s.app.any_issue(),
                         pinned: s.app.config.pin_position,
@@ -1990,11 +2093,13 @@ fn on_timer(hwnd: HWND, id: usize, actions: &mut Vec<Action>) {
 /// Apply worker output; the list redraws only when something actually changed.
 fn pump_worker(actions: &mut Vec<Action>) {
     let mut popup: Option<HWND> = None;
+    let mut left_login = false;
     let changed = State::with(|s| {
         let updates = s.worker.drain();
         if updates.is_empty() {
             return false;
         }
+        let was_login = s.app.is_login();
         // Detail answers belong to the popup, not the list; everything else is
         // list state.
         let mut rest = Vec::with_capacity(updates.len());
@@ -2005,6 +2110,7 @@ fn pump_worker(actions: &mut Vec<Action>) {
             }
         }
         s.app.apply_updates(rest);
+        left_login = was_login && !s.app.is_login();
         popup = s.detail.as_ref().map(|p| p.hwnd);
         true
     });
@@ -2016,6 +2122,9 @@ fn pump_worker(actions: &mut Vec<Action>) {
             invalidate(hwnd);
         }
         sync_activation(actions);
+        if left_login {
+            actions.push(Action::FitLogin(false));
+        }
     }
 }
 
@@ -2058,10 +2167,23 @@ fn rebuild_doc(open: &mut DetailPopup, aliases: &[config::ModelAlias]) {
 /// The window must accept focus while the sign-in form is up, and while the
 /// header id field is being typed in. A poll must not take it away mid-entry.
 fn sync_activation(actions: &mut Vec<Action>) {
-    let wants = State::with(|s| s.app.is_login() || s.app.id_editing).unwrap_or(false);
-    let has = State::with(|s| s.activatable).unwrap_or(wants);
+    let (wants, login, has) = State::with(|s| {
+        (
+            s.app.is_login() || s.app.id_editing,
+            s.app.is_login(),
+            s.activatable,
+        )
+    })
+    .unwrap_or((false, false, false));
     if wants != has {
         actions.push(Action::SetActivatable(wants));
+    }
+    // The form is taller than a short list window, so the panel grows while it
+    // is up and returns to the list size afterwards. Pushed even when the
+    // activation style did not change, since a different account form can be
+    // the same size as the last one.
+    if login {
+        actions.push(Action::FitLogin(true));
     }
 }
 
@@ -2204,25 +2326,12 @@ fn on_left_down(hwnd: HWND, lp: LPARAM, actions: &mut Vec<Action>) {
                 Some(LoginAction::Submit) => actions.push(Action::SignIn),
                 Some(LoginAction::CycleMode) => {
                     if let Some(f) = s.app.login.as_mut() {
-                        // Saving a password belongs to the hidden password
-                        // method, so the selector only walks the two modes
-                        // that mean something here. A config left in password
-                        // mode falls back to not storing anything.
-                        let next = match f.mode {
-                            CredentialMode::None => CredentialMode::Token,
-                            _ => CredentialMode::None,
-                        };
-                        f.set_mode(next);
+                        f.cycle_mode();
                     }
                 }
                 Some(LoginAction::SetMethod(method)) => {
                     if let Some(f) = s.app.login.as_mut() {
-                        f.method = method;
-                        f.focus_field(match method {
-                            Method::Password => Field::Email,
-                            Method::Token => Field::Token,
-                        });
-                        f.error = None;
+                        f.set_method(method);
                     }
                 }
                 Some(LoginAction::Focus(field)) => {
@@ -2326,7 +2435,6 @@ fn list_view(s: &State) -> ListView<'_> {
         hover: s.app.hover,
         selected: s.app.selected,
         status_text: None,
-        user: None,
         accounts: &s.app.accounts,
         settings_alert: s.app.any_issue(),
         pinned: s.app.config.pin_position,
@@ -2339,27 +2447,9 @@ fn list_view(s: &State) -> ListView<'_> {
     }
 }
 
-/// The worker's poll list: one target per saved account, with whatever token
-/// the encrypted blob holds for it.
-fn targets_from(config: &Config, stored: &Stored) -> Vec<Target> {
-    config
-        .accounts
-        .iter()
-        .map(|account| Target {
-            id: account.id.clone(),
-            name: account.name.clone(),
-            endpoint: account.endpoint.clone(),
-            project_id: account.project_id.clone(),
-            token: stored
-                .token_for(&account.id)
-                .filter(|token| !token.is_empty()),
-        })
-        .collect()
-}
-
-/// Hand the worker the current set of accounts and tokens.
+/// Hand the worker the current set of accounts and credentials.
 fn send_targets(s: &mut State) {
-    let targets = targets_from(&s.app.config, &s.app.stored);
+    let targets = worker::targets_from(&s.app.config, &s.app.stored);
     s.worker.send(Command::SetTargets(targets));
 }
 
@@ -2548,14 +2638,16 @@ fn submit_login(hwnd: HWND) {
 
     match submission {
         Submission::Password(creds) => {
-            // Remember what to persist once a token comes back; the password is
-            // only written when the mode allows it.
+            // Remember what to persist once a token comes back; `Config::store`
+            // only writes the password when the selected mode allows it.
             State::with(|s| {
                 let Some((id, _name)) = upsert_form_account(s) else {
                     return;
                 };
-                s.app.stored.email = creds.email.clone();
-                s.app.stored.password = Some(creds.password.clone());
+                let mut stored = s.app.stored.clone();
+                stored.set_credentials(&id, &creds);
+                s.app.stored = stored.clone();
+                s.app.config.store(&stored);
                 s.app.save();
                 // The account has to exist in the poll list before the answer
                 // lands, or the issued token would have nowhere to go.
@@ -2589,6 +2681,11 @@ fn submit_login(hwnd: HWND) {
     }
     let mut actions = Vec::new();
     sync_activation(&mut actions);
+    // A token sign-in finishes on this path (the password one finishes when the
+    // worker answers), so restore the list size here too.
+    if State::with(|s| !s.app.is_login() && s.settings_login.is_none()).unwrap_or(false) {
+        actions.push(Action::FitLogin(false));
+    }
     run_actions(hwnd, actions);
     invalidate(hwnd);
 }

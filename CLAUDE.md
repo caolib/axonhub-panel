@@ -61,6 +61,8 @@ UI 线程上每 200ms 的 `WM_TIMER`（定时器 id `TIMER_POLL`）触发 `pump_
 
 `/admin/graphql`（列表数据源）**只接受 JWT Bearer**，不接受 API key（会 `401 Invalid token`）。代码里没有「API key 换 JWT」的接口；签发 JWT 只有登录 / 邀请注册 / OIDC 三处。给面板配凭据时务必用访问令牌或账号密码登录，而非 API key。
 
+AxonHub 没有 refresh token。所谓“自动刷新令牌”= 在 `credential_mode == password` 时用保存的邮箱密码重新调用 `/admin/auth/signin`。这条逻辑集中在 `worker.rs` 的 `Target::authorized`：查询前用 `token::is_expired` 预判、查询 401 后重登并重试一次；重登成功发 `Update::TokenRefreshed`（不切换视图，避免打断正在填写的表单），密码被拒则 `auth_blocked`，网络类失败按 2s→30s 退避。**不要**在 401 时 `forget_account`——那会连保存的密码一起删掉，自动续期就失效了，应只 `clear_token`。
+
 ## 跨文件陷阱 / 注意点
 
 - **serde 字段重命名**：AxonHub 部分字段是全大写缩写（`modelID`、`apiKey`、`clientIP`、`requestURL`、`baseURL`），`serde(rename_all="camelCase")` 会把它们静默变成 `None`。这些字段必须显式 `#[serde(rename=...)]`，新增 GraphQL 字段时务必核对大小写。

@@ -874,6 +874,12 @@ fn dispatch(hwnd: HWND, action: Action) {
                 }
                 s.app.config.store(&s.app.stored);
                 s.app.save();
+                // The worker holds an in-memory copy of the stored password;
+                // rebuild it so a downgrade stops renewal immediately and an
+                // upgrade starts using the password already on disk.
+                s.worker.send(crate::worker::Command::SetTargets(
+                    crate::worker::targets_from(&s.app.config, &s.app.stored),
+                ));
             });
         }
         Action::ClearChannels => {
@@ -1001,7 +1007,7 @@ fn begin_login(owner: HWND, target: LoginTarget) {
     let fitted = fit(
         RECT {
             right: rc.left + (452.0 * scale) as i32,
-            bottom: rc.top + (440.0 * scale) as i32,
+            bottom: rc.top + crate::ui::login::window_height(scale),
             ..rc
         },
         work,
@@ -1031,26 +1037,49 @@ pub fn finish_login(owner: HWND, cancel: bool) {
         } else {
             s.app.login = None;
         }
-        Some((previous.geometry, previous.anchor))
+        Some((previous.geometry, previous.anchor, s.app.is_login()))
     })
     .flatten();
-    let Some((rect, anchor)) = previous else {
+    let Some((rect, anchor, still_login)) = previous else {
         return;
     };
-    unsafe {
-        let _ = SetWindowPos(
-            owner,
-            None,
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            SWP_NOZORDER | SWP_NOACTIVATE,
+    if still_login {
+        // Cancelling returns to the form, which is taller than the settings
+        // window it was shown in; keep it fully visible.
+        let scale = crate::window_scale(owner);
+        let work = crate::work_area_for(owner);
+        let fitted = fit(
+            RECT {
+                left: rect.x,
+                top: rect.y,
+                right: rect.x + (452.0 * scale) as i32,
+                bottom: rect.y + crate::ui::login::window_height(scale),
+            },
+            work,
         );
+        unsafe {
+            let _ = SetWindowPos(
+                owner,
+                None,
+                fitted.left,
+                fitted.top,
+                fitted.right - fitted.left,
+                fitted.bottom - fitted.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        let mut actions = Vec::new();
+        crate::sync_activation(&mut actions);
+        crate::run_actions(owner, actions);
+        invalidate(owner);
+        return;
     }
     let mut actions = Vec::new();
     crate::sync_activation(&mut actions);
-    if PanelState::with(|s| !s.app.is_login() && s.app.config.always_on_bottom).unwrap_or(false) {
+    // `sync_activation` leaves the panel tall while the form is up; this path
+    // is leaving it, so return to the saved list size.
+    actions.push(PanelAction::FitLogin(false));
+    if PanelState::with(|s| s.app.config.always_on_bottom).unwrap_or(false) {
         actions.push(PanelAction::SetBottom(true));
     }
     crate::run_actions(owner, actions);

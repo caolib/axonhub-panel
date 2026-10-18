@@ -50,7 +50,6 @@ fn view<'a>(rows: &'a [Row], hidden: &'a [DisplayField]) -> ListView<'a> {
         hover: None,
         selected: None,
         status_text: None,
-        user: None,
         accounts: &[],
         settings_alert: false,
         pinned: false,

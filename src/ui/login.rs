@@ -21,15 +21,22 @@ pub enum Field {
 }
 
 /// Which credentials the form collects. Either a password or a token is enough
-/// to obtain access; the token path avoids putting a password on disk at all.
-///
-/// Only `Token` is reachable from the form today — the password method is
-/// hidden — but the variant and its handling are kept for when it returns.
+/// to obtain access; the token path avoids putting a password on disk at all,
+/// while the password path is what lets the worker renew a session by itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Method {
-    #[allow(dead_code)]
     Password,
     Token,
+}
+
+impl Method {
+    /// Tab label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Method::Password => "账号密码",
+            Method::Token => "访问令牌",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -84,15 +91,25 @@ impl LoginForm {
         let mut form = LoginForm::blank(&account.endpoint, mode);
         form.account_name = account.name.clone();
         form.editing = Some(account.id.clone());
-        form.focus = Field::Token;
+        form.focus = match form.method {
+            Method::Password => Field::Email,
+            Method::Token => Field::Token,
+        };
         form
     }
 
     fn blank(endpoint: &str, mode: CredentialMode) -> Self {
-        // Token only: the password method is hidden from the form, so there is
-        // nothing to choose and the token field takes the focus. The password
-        // path — `Method::Password`, the email/password fields and everything
-        // that submits them — is kept, just not reachable from here.
+        // Password mode is the only reason to collect an email and password:
+        // it is what lets the worker sign in again after the session expires.
+        // Every other mode uses a pasted token.
+        let method = match mode {
+            CredentialMode::Password => Method::Password,
+            _ => Method::Token,
+        };
+        let focus = match method {
+            Method::Password => Field::Email,
+            Method::Token => Field::Token,
+        };
         LoginForm {
             return_to_settings: false,
             account_name: String::new(),
@@ -101,8 +118,8 @@ impl LoginForm {
             email: String::new(),
             password: String::new(),
             token: String::new(),
-            method: Method::Token,
-            focus: Field::Token,
+            method,
+            focus,
             caret: 0,
             anchor: None,
             error: None,
@@ -262,6 +279,60 @@ impl LoginForm {
         self.error = None;
     }
 
+    /// Switch between the token and password tabs.
+    ///
+    /// The two methods collect different fields, so switching also moves the
+    /// focus to the first field the new method asks for. The storage mode
+    /// follows the method where it has to: collecting a password only makes
+    /// sense when that password is kept (otherwise it buys nothing over a
+    /// token), and leaving the password tab drops the password mode back to a
+    /// token, which the form can actually collect. Switching is refused while
+    /// a sign-in is in flight, since the submitted credentials must not change
+    /// underneath the worker.
+    pub fn set_method(&mut self, method: Method) {
+        if self.busy {
+            return;
+        }
+        if method != self.method {
+            match (self.method, method) {
+                (Method::Token, Method::Password) => {
+                    self.mode = CredentialMode::Password;
+                }
+                (Method::Password, Method::Token) if self.mode == CredentialMode::Password => {
+                    self.mode = CredentialMode::Token;
+                }
+                _ => {}
+            }
+            self.method = method;
+        }
+        self.focus_field(match method {
+            Method::Password => Field::Email,
+            Method::Token => Field::Token,
+        });
+        self.error = None;
+    }
+
+    /// Cycle the credential storage mode. The password method also offers the
+    /// password mode; the token method cannot collect a password, so its list
+    /// stays on the two modes that make sense there.
+    pub fn cycle_mode(&mut self) {
+        if self.busy {
+            return;
+        }
+        let next = match self.method {
+            Method::Password => match self.mode {
+                CredentialMode::None => CredentialMode::Token,
+                CredentialMode::Token => CredentialMode::Password,
+                CredentialMode::Password => CredentialMode::None,
+            },
+            Method::Token => match self.mode {
+                CredentialMode::None => CredentialMode::Token,
+                _ => CredentialMode::None,
+            },
+        };
+        self.set_mode(next);
+    }
+
     pub fn credentials(&self) -> Credentials {
         Credentials {
             email: self.email.trim().to_string(),
@@ -351,12 +422,12 @@ impl LoginForm {
         let limit = self.char_limit();
         let caret = self.caret.min(self.focused_len());
         let mut placed = false;
-        if let Some(text) = self.focused_text() {
-            if text.chars().count() < limit {
-                let at = byte_at(text, caret);
-                text.insert(at, ch);
-                placed = true;
-            }
+        if let Some(text) = self.focused_text()
+            && text.chars().count() < limit
+        {
+            let at = byte_at(text, caret);
+            text.insert(at, ch);
+            placed = true;
         }
         if placed {
             self.caret = caret + 1;
@@ -476,6 +547,8 @@ impl LoginForm {
 /// methods show a different set of fields, so the layout follows the method.
 pub struct LoginLayout {
     pub card: Rect,
+    /// The two method tabs, in display order.
+    pub tabs: Vec<(Rect, Method)>,
     /// (rect, label) for the fields currently shown.
     pub fields: Vec<(Rect, &'static str)>,
     pub mode_select: Rect,
@@ -488,10 +561,28 @@ pub struct LoginLayout {
 const FIELD_H: f32 = 34.0;
 const LABEL_H: f32 = 18.0;
 const FIELD_GAP: f32 = 14.0;
-/// Title and subtitle, down to the first field label.
+/// Title and subtitle, down to the method tabs.
 const HEAD_H: f32 = 62.0;
+const TAB_H: f32 = 28.0;
+const TAB_W: f32 = 104.0;
+const TAB_GAP: f32 = 8.0;
+/// Tab row plus the gap down to the first field label.
+const TABS_H: f32 = TAB_H + 12.0;
 /// Everything below the last field: mode line, button and error line.
 const TAIL_H: f32 = 118.0;
+/// Breathing room kept above and below the card.
+const CARD_MARGIN: f32 = 16.0;
+/// Fields the password method shows: name, endpoint, email, password.
+const PASSWORD_FIELDS: f32 = 4.0;
+
+/// Height that fits the tallest (password) form with its margins, in device
+/// pixels. The panel's own default window is taller, but a window temporarily
+/// reused for sign-in — the settings window, for one — must not clip the card.
+pub fn window_height(scale: f32) -> i32 {
+    let s = scale.max(0.5);
+    let card_h = (HEAD_H + TABS_H + TAIL_H) + PASSWORD_FIELDS * (LABEL_H + FIELD_H + FIELD_GAP);
+    ((card_h + CARD_MARGIN * 2.0) * s).ceil() as i32
+}
 
 pub fn layout(form: &LoginForm, m: Metrics) -> LoginLayout {
     // The form is authored at 96 DPI and scales with the monitor so it stays
@@ -505,10 +596,14 @@ pub fn layout(form: &LoginForm, m: Metrics) -> LoginLayout {
     let inner_w = card_w - 36.0 * s;
 
     let has_credentials = form.method == Method::Password;
-    let field_count = if has_credentials { 4.0 } else { 3.0 };
-    let card_h = (HEAD_H + TAIL_H) * s + field_count * (label_h + field_h + field_gap);
+    let field_count = if has_credentials {
+        PASSWORD_FIELDS
+    } else {
+        3.0
+    };
+    let card_h = (HEAD_H + TABS_H + TAIL_H) * s + field_count * (label_h + field_h + field_gap);
 
-    let card_y = ((m.height - card_h) / 2.0).max(16.0 * s);
+    let card_y = ((m.height - card_h) / 2.0).max(CARD_MARGIN * s);
     let card = Rect {
         x: card_x,
         y: card_y,
@@ -516,11 +611,31 @@ pub fn layout(form: &LoginForm, m: Metrics) -> LoginLayout {
         h: card_h,
     };
 
-    // Title and subtitle, down to where the first label starts. The method
-    // tabs used to sit in here; with the password method hidden the form goes
-    // straight to its fields.
-    let mut y = card_y + HEAD_H * s;
-    let mut fields = Vec::with_capacity(3);
+    // Title and subtitle, then the two method tabs side by side.
+    let tabs_y = card_y + HEAD_H * s;
+    let tabs = vec![
+        (
+            Rect {
+                x: inner_x,
+                y: tabs_y,
+                w: TAB_W * s,
+                h: TAB_H * s,
+            },
+            Method::Token,
+        ),
+        (
+            Rect {
+                x: inner_x + (TAB_W + TAB_GAP) * s,
+                y: tabs_y,
+                w: TAB_W * s,
+                h: TAB_H * s,
+            },
+            Method::Password,
+        ),
+    ];
+
+    let mut y = tabs_y + TABS_H * s;
+    let mut fields = Vec::with_capacity(4);
     let push = |fields: &mut Vec<(Rect, &'static str)>, label: &'static str, y: &mut f32| {
         fields.push((
             Rect {
@@ -564,6 +679,7 @@ pub fn layout(form: &LoginForm, m: Metrics) -> LoginLayout {
 
     LoginLayout {
         card,
+        tabs,
         fields,
         mode_select,
         remember_box,
@@ -798,6 +914,7 @@ fn placeholder_for(field: Field) -> &'static str {
         Field::Name => "例如:工作、个人",
         Field::Endpoint => "http://localhost:8090",
         Field::Email => "you@example.com",
+        Field::Password => "输入密码",
         Field::Token => "eyJhbGciOi...",
         _ => "",
     }
@@ -840,7 +957,7 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
     );
     p.dual_text(
         &fonts.small,
-        "可添加多个账号,请求合并显示;直接粘贴访问令牌即可",
+        "可添加多个账号,请求合并显示;访问令牌或账号密码均可登录",
         l.card.x + inset,
         l.card.y + 36.0 * s,
         l.card.w - inset * 2.0,
@@ -848,6 +965,32 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
         theme::TEXT_FAINT,
         theme::ALIGN_NEAR,
     );
+
+    // Method tabs: token is the everyday path, password is what enables the
+    // worker to renew a session on its own. Switching is refused while busy, so
+    // the tabs read as disabled in that state.
+    for (rect, method) in &l.tabs {
+        let selected = form.method == *method;
+        let (fill, border, color) = if form.busy {
+            (theme::INPUT_BG, theme::INPUT_BORDER, theme::TEXT_FAINT)
+        } else if selected {
+            (theme::TAB_ON, theme::MAUVE, theme::TEXT)
+        } else {
+            (theme::INPUT_BG, theme::INPUT_BORDER, theme::TEXT_DIM)
+        };
+        p.round_rect(rect.x, rect.y, rect.w, rect.h, 6.0 * s, fill, true);
+        p.round_rect(rect.x, rect.y, rect.w, rect.h, 6.0 * s, border, false);
+        p.dual_text(
+            &fonts.small,
+            method.label(),
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            color,
+            theme::ALIGN_CENTER,
+        );
+    }
 
     if form.return_to_settings {
         let r = back_button(form, m);
@@ -863,9 +1006,6 @@ pub fn draw(p: &Painter, fonts: &theme::Fonts, form: &LoginForm, m: Metrics) {
         );
     }
 
-    // The method tabs are gone: the password method is hidden, so there is
-    // nothing to choose. `Method` and everything behind it is still in place
-    // should the choice ever come back.
     for (i, (rect, label)) in l.fields.iter().enumerate() {
         let field = field_for(form.method, i);
         let focused = form.focus == field;
@@ -964,6 +1104,11 @@ pub fn hit(form: &LoginForm, m: Metrics, x: f32, y: f32) -> Option<Action> {
         return Some(Action::Back);
     }
     let l = layout(form, m);
+    if !form.busy
+        && let Some((_, method)) = l.tabs.iter().find(|(rect, _)| rect.contains(x, y))
+    {
+        return Some(Action::SetMethod(*method));
+    }
     if l.button.contains(x, y) {
         return Some(Action::Submit);
     }
@@ -1011,9 +1156,11 @@ pub enum Action {
     Back,
     Submit,
     CycleMode,
-    /// Choosing a method is no longer possible from the form — the tabs are
-    /// hidden — but the variant stays so the password method remains wired.
-    #[allow(dead_code)]
+    /// A method tab was clicked.
     SetMethod(Method),
     Focus(Field),
 }
+
+#[cfg(test)]
+#[path = "../tests/ui/login.rs"]
+mod tests;

@@ -461,21 +461,18 @@ impl Row {
             // the last error seen before it was canceled. A failed attempt
             // without a code (a timeout, a cancellation) is skipped rather
             // than blanking the cell.
-            error_status_code: req
-                .executions
-                .as_ref()
-                .and_then(|c| {
-                    c.edges
-                        .iter()
-                        .filter_map(|e| e.node.as_ref())
-                        .filter(|e| {
-                            matches!(
-                                Status::parse(e.status.as_deref()),
-                                Status::Failed | Status::Canceled
-                            )
-                        })
-                        .find_map(|e| e.response_status_code)
-                }),
+            error_status_code: req.executions.as_ref().and_then(|c| {
+                c.edges
+                    .iter()
+                    .filter_map(|e| e.node.as_ref())
+                    .filter(|e| {
+                        matches!(
+                            Status::parse(e.status.as_deref()),
+                            Status::Failed | Status::Canceled
+                        )
+                    })
+                    .find_map(|e| e.response_status_code)
+            }),
         }
     }
 
