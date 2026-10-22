@@ -520,8 +520,9 @@ pub fn plain_text(doc: &Doc) -> String {
             }
             Line::Field { label, value, .. } => {
                 out.push_str(label);
+                out.push(':');
                 if !value.is_empty() {
-                    out.push_str(": ");
+                    out.push(' ');
                     out.push_str(value);
                 }
                 out.push('\n');
