@@ -101,6 +101,8 @@ pub struct Config {
     /// working on the result of the previous one. An empty `to` deletes the
     /// matches.
     pub model_aliases: Vec<ModelAlias>,
+    /// Friendly names for one account's channel credential indices.
+    pub channel_key_aliases: Vec<ChannelKeyAlias>,
     /// Card cells the user switched off in the settings window. Empty means
     /// everything is shown, so a cell added in a later version starts visible.
     pub hidden_fields: Vec<DisplayField>,
@@ -138,7 +140,7 @@ impl Default for WindowState {
             x: -1,
             y: -1,
             width: 452,
-            height: crate::ui::layout::height_for_rows(DEFAULT_ROWS, 1.0, LayoutMode::Cards),
+            height: crate::ui::layout::height_for_rows(DEFAULT_ROWS, 1.0, LayoutMode::Table),
         }
     }
 }
@@ -157,7 +159,10 @@ impl Default for Config {
             font_family: String::new(),
             cjk_font_family: String::new(),
             single_line: false,
-            table_mode: false,
+            // The table is the out-of-the-box view: one request per row reads
+            // best for scanning. An older config without the key lands here
+            // too, unless the user has already chosen otherwise.
+            table_mode: true,
             opacity: 100,
             always_on_top: true,
             pin_position: false,
@@ -166,6 +171,7 @@ impl Default for Config {
             accounts: Vec::new(),
             hidden_channels: Vec::new(),
             model_aliases: Vec::new(),
+            channel_key_aliases: Vec::new(),
             hidden_fields: Vec::new(),
             window: WindowState::default(),
         }
@@ -241,6 +247,38 @@ pub struct ModelAlias {
     pub to: String,
 }
 
+/// A display-only alias for one channel credential, isolated by account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelKeyAlias {
+    pub account_id: String,
+    pub channel: String,
+    pub key_index: i64,
+    pub alias: String,
+}
+
+/// Resolve a credential label without changing the wire index or any secret.
+pub fn channel_key_text(
+    aliases: &[ChannelKeyAlias],
+    account_id: &str,
+    channel: Option<&str>,
+    index: Option<i64>,
+) -> Option<String> {
+    let index = index?;
+    let alias = aliases.iter().find(|entry| {
+        entry.account_id == account_id
+            && Some(entry.channel.as_str()) == channel
+            && entry.key_index == index
+    });
+    Some(
+        alias
+            .map(|entry| entry.alias.trim())
+            .filter(|alias| !alias.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Key #{index}")),
+    )
+}
+
 /// One informational cell a request card can show. Listed in the order the
 /// settings window offers them: the status marks first, then the request's
 /// identity and routing, and finally the timestamp.
@@ -254,19 +292,28 @@ pub enum DisplayField {
     /// 透: whether pass-through was applied.
     PassThrough,
     Model,
+    /// 上游模型: the raw model returned by the provider.
+    UpstreamModel,
     /// 协议: the interface type the caller spoke.
     Protocol,
     Caller,
     Channel,
+    /// 渠道 Key: the raw upstream credential index.
+    #[serde(rename = "channelAPIKeyIndex")]
+    ChannelAPIKeyIndex,
     Tokens,
     /// 缓存: prompt cache hit rate.
     Cache,
+    /// 写缓存: tokens written into the prompt cache.
+    CacheWrite,
     /// 速度: tokens per second.
     Speed,
     /// 重试: attempts beyond the first.
     Retry,
     /// 费用: billed cost of the request.
     Cost,
+    /// 费用明细: billed amount per usage category.
+    CostBreakdown,
     /// 耗时: total latency and time to first token.
     Latency,
     /// 补全: completion tokens, with the reasoning share called out.
@@ -281,19 +328,23 @@ pub enum DisplayField {
 
 impl DisplayField {
     /// Every cell, in settings order.
-    pub const ALL: [DisplayField; 17] = [
+    pub const ALL: [DisplayField; 21] = [
         DisplayField::Stream,
         DisplayField::Conversion,
         DisplayField::PassThrough,
         DisplayField::Model,
+        DisplayField::UpstreamModel,
         DisplayField::Protocol,
         DisplayField::Caller,
         DisplayField::Channel,
+        DisplayField::ChannelAPIKeyIndex,
         DisplayField::Tokens,
         DisplayField::Cache,
+        DisplayField::CacheWrite,
         DisplayField::Speed,
         DisplayField::Retry,
         DisplayField::Cost,
+        DisplayField::CostBreakdown,
         DisplayField::Latency,
         DisplayField::Completion,
         DisplayField::Source,
@@ -309,14 +360,18 @@ impl DisplayField {
             DisplayField::Conversion => "转 · 协议转换",
             DisplayField::PassThrough => "透 · 透传",
             DisplayField::Model => "模型",
+            DisplayField::UpstreamModel => "上游模型 · 实际返回",
             DisplayField::Protocol => "协议 · 接口类型",
             DisplayField::Caller => "调用方 · API Key",
             DisplayField::Channel => "渠道",
+            DisplayField::ChannelAPIKeyIndex => "渠道 Key · 索引或别名",
             DisplayField::Tokens => "词元 · Token 数",
             DisplayField::Cache => "缓存 · 命中率",
+            DisplayField::CacheWrite => "写缓存 · 写入词元",
             DisplayField::Speed => "速度 · tps",
             DisplayField::Retry => "重试次数",
             DisplayField::Cost => "费用",
+            DisplayField::CostBreakdown => "费用明细 · 分项金额",
             DisplayField::Latency => "耗时 · [首字·总]",
             DisplayField::Completion => "补全 · 输出词元",
             DisplayField::Source => "来源 · 入口与 IP",
@@ -556,6 +611,8 @@ impl Config {
     /// Drop one account's metadata.
     pub fn remove_account(&mut self, id: &str) {
         self.accounts.retain(|a| a.id != id);
+        self.channel_key_aliases
+            .retain(|entry| entry.account_id != id);
     }
 
     /// An id no account is using, derived from the account's name.
@@ -612,6 +669,41 @@ impl Config {
     pub fn remove_model_alias(&mut self, index: usize) {
         if index < self.model_aliases.len() {
             self.model_aliases.remove(index);
+        }
+    }
+
+    /// Add or update one account/channel/index mapping. Blank labels and
+    /// negative indices cannot identify a usable credential.
+    pub fn upsert_channel_key_alias(
+        &mut self,
+        account_id: &str,
+        channel: &str,
+        key_index: i64,
+        alias: &str,
+    ) -> bool {
+        let (account_id, channel, alias) = (account_id.trim(), channel.trim(), alias.trim());
+        if account_id.is_empty() || channel.is_empty() || alias.is_empty() || key_index < 0 {
+            return false;
+        }
+        match self.channel_key_aliases.iter_mut().find(|entry| {
+            entry.account_id == account_id
+                && entry.channel == channel
+                && entry.key_index == key_index
+        }) {
+            Some(entry) => entry.alias = alias.to_string(),
+            None => self.channel_key_aliases.push(ChannelKeyAlias {
+                account_id: account_id.to_string(),
+                channel: channel.to_string(),
+                key_index,
+                alias: alias.to_string(),
+            }),
+        }
+        true
+    }
+
+    pub fn remove_channel_key_alias(&mut self, index: usize) {
+        if index < self.channel_key_aliases.len() {
+            self.channel_key_aliases.remove(index);
         }
     }
 

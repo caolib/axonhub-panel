@@ -27,7 +27,10 @@ fn row_with(requested: &str, served: Option<&str>) -> Row {
         status: Status::Completed,
         model: requested.to_string(),
         routed_model: served.map(str::to_string),
+        upstream_model: None,
         channel: None,
+        channel_api_key_index: None,
+        channel_key_label: None,
         caller: None,
         source: None,
         client_ip: None,
@@ -46,6 +49,7 @@ fn row_with(requested: &str, served: Option<&str>) -> Row {
         cached_tokens: 0,
         write_cached_tokens: 0,
         total_cost: None,
+        cost_items: Vec::new(),
         attempt_count: 0,
         failed_attempts: 0,
         attempts_truncated: false,
@@ -228,6 +232,102 @@ fn model_aliases_rewrite_every_match_in_order() {
     config.remove_model_alias(0);
     config.remove_model_alias(5);
     assert!(config.model_aliases.is_empty());
+}
+
+#[test]
+fn latest_execution_keeps_the_raw_upstream_model_and_zero_key_index() {
+    let req = wire_request(
+        r#"{
+          "id": "gid://axonhub/Request/8",
+          "modelID": "client-model",
+          "executions": { "totalCount": 2, "edges": [
+            { "node": { "modelID": "routed-model", "upstreamModelID": " provider/raw-model ", "channelAPIKeyIndex": 0 } },
+            { "node": { "modelID": "old-model", "upstreamModelID": "old-raw", "channelAPIKeyIndex": 3 } }
+          ] }
+        }"#,
+    );
+    let row = Row::from_wire(&req);
+    assert_eq!(row.model, "client-model");
+    assert_eq!(row.routed_model.as_deref(), Some("routed-model"));
+    assert_eq!(row.upstream_model.as_deref(), Some("provider/raw-model"));
+    assert_eq!(row.channel_api_key_index, Some(0));
+
+    let req = wire_request(
+        r#"{
+          "id": "gid://axonhub/Request/9",
+          "executions": { "edges": [
+            { "node": { "upstreamModelID": "  " } },
+            { "node": { "upstreamModelID": "old-raw", "channelAPIKeyIndex": 3 } }
+          ] }
+        }"#,
+    );
+    let row = Row::from_wire(&req);
+    assert!(row.upstream_model.is_none());
+    assert!(row.channel_api_key_index.is_none());
+}
+
+#[test]
+fn execution_detail_preserves_uppercase_acronym_fields() {
+    let execution: ExecutionDetail = serde_json::from_str(
+        r#"{"modelID":"mapped","upstreamModelID":"actual","channelAPIKeyIndex":0}"#,
+    )
+    .unwrap();
+    assert_eq!(execution.upstream_model_id.as_deref(), Some("actual"));
+    assert_eq!(execution.channel_api_key_index, Some(0));
+}
+
+#[test]
+fn cost_items_accept_decimal_strings_numbers_and_optional_tiers() {
+    let req = wire_request(
+        r#"{
+          "id": "gid://axonhub/Request/10",
+          "usageLogs": { "edges": [ { "node": {
+            "promptWriteCachedTokens": 3000,
+            "costItems": [
+              { "itemCode": "prompt_tokens", "quantity": 1000, "subtotal": "0.0012", "tierBreakdown": null },
+              { "itemCode": "completion_tokens", "quantity": 200, "subtotal": 0.0034,
+                "tierBreakdown": [{"upTo": null, "units": 200, "subtotal": "0.0034"}] },
+              { "itemCode": "provider_special", "quantity": 1, "subtotal": "0" }
+            ]
+          } } ] }
+        }"#,
+    );
+    let row = Row::from_wire(&req);
+    assert_eq!(row.write_cached_tokens, 3000);
+    assert_eq!(row.cost_items.len(), 3);
+    assert_eq!(row.cost_items[0].label(), "输入");
+    assert_eq!(row.cost_items[0].subtotal, 0.0012);
+    assert!(row.cost_items[0].tier_breakdown.is_empty());
+    assert_eq!(row.cost_items[1].tier_breakdown[0].up_to, None);
+    assert_eq!(row.cost_items[1].tier_breakdown[0].units, 200);
+    assert_eq!(row.cost_items[1].tier_breakdown[0].subtotal, 0.0034);
+    assert_eq!(row.cost_items[2].label(), "provider_special");
+    assert_eq!(
+        row.cost_breakdown_text().as_deref(),
+        Some("入 $0.0012 · 出 $0.0034 · provider_special $0.0000")
+    );
+}
+
+#[test]
+fn absent_or_null_cost_items_and_upstream_metadata_stay_empty() {
+    for usage in [r#"{}"#, r#"{"costItems":null}"#, r#"{"costItems":[]}"#] {
+        let json = format!(
+            r#"{{"id":"gid://axonhub/Request/11","usageLogs":{{"edges":[{{"node":{usage}}}]}}}}"#
+        );
+        let row = Row::from_wire(&wire_request(&json));
+        assert!(row.cost_items.is_empty());
+        assert!(row.cost_breakdown_text().is_none());
+        assert!(row.upstream_model.is_none());
+        assert!(row.channel_api_key_index.is_none());
+    }
+}
+
+#[test]
+fn cost_items_reject_invalid_decimal_amounts() {
+    for amount in [r#""NaN""#, r#""inf""#, r#""not-a-number""#, "-1", "null"] {
+        let json = format!(r#"{{"itemCode":"prompt_tokens","quantity":1,"subtotal":{amount}}}"#);
+        assert!(serde_json::from_str::<CostItem>(&json).is_err(), "{json}");
+    }
 }
 
 fn wire_request(json: &str) -> Request {

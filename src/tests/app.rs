@@ -11,7 +11,10 @@ fn row(status: Status) -> Row {
         status,
         model: String::new(),
         routed_model: None,
+        upstream_model: None,
         channel: None,
+        channel_api_key_index: None,
+        channel_key_label: None,
         caller: None,
         source: None,
         client_ip: None,
@@ -30,6 +33,7 @@ fn row(status: Status) -> Row {
         cached_tokens: 0,
         write_cached_tokens: 0,
         total_cost: None,
+        cost_items: Vec::new(),
         attempt_count: 1,
         failed_attempts: 0,
         attempts_truncated: false,
@@ -148,11 +152,35 @@ fn any_issue_covers_every_way_an_account_cannot_connect() {
 }
 
 #[test]
+fn key_alias_changes_rebuild_existing_rows_without_changing_wire_indices() {
+    let mut app = App::new(Config::default());
+    let mut request = row(Status::Completed);
+    request.account_id = "a1".into();
+    request.channel = Some("A".into());
+    request.channel_api_key_index = Some(2);
+    let mut other = request.clone();
+    other.account_id = "a2".into();
+    app.axon_rows = vec![request, other];
+    app.rebuild();
+    assert_eq!(app.rows[0].channel_key_label.as_deref(), Some("Key #2"));
+    app.config.upsert_channel_key_alias("a1", "A", 2, "my-k2");
+    app.rebuild();
+    assert_eq!(app.rows[0].channel_key_label.as_deref(), Some("my-k2"));
+    assert_eq!(app.rows[1].channel_key_label.as_deref(), Some("Key #2"));
+    assert_eq!(app.rows[0].channel_api_key_index, Some(2));
+    assert!(app.axon_rows[0].channel_key_label.is_none());
+    app.config.remove_channel_key_alias(0);
+    app.rebuild();
+    assert_eq!(app.rows[0].channel_key_label.as_deref(), Some("Key #2"));
+}
+
+#[test]
 fn model_abbreviations_apply_on_rebuild_and_survive_it() {
     let mut app = App::new(Config::default());
     let mut routed = row(Status::Completed);
     routed.model = "deepseek-v4.1-flash".into();
     routed.routed_model = Some("DeepSeek-R1".into());
+    routed.upstream_model = Some("provider/deepseek-actual".into());
     app.axon_rows = vec![routed];
     app.config.upsert_model_alias("deepseek", "ds");
     app.rebuild();
@@ -161,6 +189,7 @@ fn model_abbreviations_apply_on_rebuild_and_survive_it() {
     // the routed marker survives the rewrite.
     assert_eq!(app.rows[0].model, "ds-v4.1-flash");
     assert_eq!(app.rows[0].routed_model.as_deref(), Some("ds-R1"));
+    assert_eq!(app.rows[0].upstream_model.as_deref(), Some("ds-actual"));
     assert!(app.rows[0].is_routed());
 
     // The worker's copy is untouched, so removing the alias restores the
@@ -169,4 +198,8 @@ fn model_abbreviations_apply_on_rebuild_and_survive_it() {
     app.rebuild();
     assert_eq!(app.rows[0].model, "deepseek-v4.1-flash");
     assert_eq!(app.rows[0].routed_model.as_deref(), Some("DeepSeek-R1"));
+    assert_eq!(
+        app.rows[0].upstream_model.as_deref(),
+        Some("provider/deepseek-actual")
+    );
 }

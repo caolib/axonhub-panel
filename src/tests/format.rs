@@ -35,10 +35,10 @@ fn clock_skew_does_not_produce_a_future_age() {
 }
 
 #[test]
-fn missing_timestamp_is_a_dash() {
-    assert_eq!(relative_time(None, BASE), DASH);
-    assert_eq!(relative_time(Some("garbage"), BASE), DASH);
-    assert_eq!(local_datetime(None), DASH);
+fn missing_timestamp_is_blank() {
+    assert_eq!(relative_time(None, BASE), BLANK);
+    assert_eq!(relative_time(Some("garbage"), BASE), BLANK);
+    assert_eq!(local_datetime(None), BLANK);
 }
 
 #[test]

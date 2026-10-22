@@ -101,7 +101,10 @@ fn row(status: Status) -> Row {
         status,
         model: String::new(),
         routed_model: None,
+        upstream_model: None,
         channel: None,
+        channel_api_key_index: None,
+        channel_key_label: None,
         caller: None,
         source: None,
         client_ip: None,
@@ -120,6 +123,7 @@ fn row(status: Status) -> Row {
         cached_tokens: 0,
         write_cached_tokens: 0,
         total_cost: None,
+        cost_items: Vec::new(),
         attempt_count: 0,
         failed_attempts: 0,
         attempts_truncated: false,
@@ -227,6 +231,35 @@ fn models_are_keyed_by_what_served_them() {
     assert_eq!(color_of(&palette, "served"), Some(NAME_PALETTE[1]));
     assert_eq!(color_of(&palette, "asked"), None);
     assert_eq!(color_of(&palette, "a"), Some(NAME_PALETTE[0]));
+}
+
+#[test]
+fn upstream_model_and_key_index_are_shown_without_reindexing() {
+    let mut routed = row(Status::Completed);
+    routed.upstream_model = Some("openai/gpt-5.2".into());
+    routed.channel_api_key_index = Some(0);
+    assert_eq!(
+        upstream_model_text(&routed),
+        Some("gpt-5.2".into()),
+        "the provider prefix is stripped like the model chip"
+    );
+    assert_eq!(key_index_text(&routed), Some("Key #0".into()));
+    assert_eq!(
+        key_index_text(&row(Status::Completed)),
+        None,
+        "a missing index has no cell"
+    );
+    routed.channel_key_label = Some("my-k0".into());
+    assert_eq!(key_index_text(&routed), Some("my-k0".into()));
+
+    routed.write_cached_tokens = 1536;
+    assert_eq!(cache_write_text(&routed), Some("写 1.5k".into()));
+    routed.write_cached_tokens = 0;
+    assert_eq!(cache_write_text(&routed), None);
+
+    let empty = row(Status::Completed);
+    assert_eq!(upstream_model_text(&empty), None);
+    assert_eq!(empty.cost_breakdown_text(), None);
 }
 
 #[test]

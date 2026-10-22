@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::Status;
+use crate::model::{CostItem, Status, TierCost};
 
 /// One unit per character: widths become exact and independent of any font.
 fn stub(text: &str) -> f32 {
@@ -16,7 +16,10 @@ fn row() -> Row {
         status: Status::Completed,
         model: String::new(),
         routed_model: None,
+        upstream_model: None,
         channel: None,
+        channel_api_key_index: None,
+        channel_key_label: None,
         caller: None,
         source: None,
         client_ip: None,
@@ -35,6 +38,7 @@ fn row() -> Row {
         cached_tokens: 0,
         write_cached_tokens: 0,
         total_cost: None,
+        cost_items: Vec::new(),
         attempt_count: 0,
         failed_attempts: 0,
         attempts_truncated: false,
@@ -83,6 +87,7 @@ fn the_table_starts_with_status_and_follows_the_hidden_fields() {
     // without it the column would be dropped for having no data at all.
     let mut retried = row();
     retried.attempt_count = 2;
+    retried.channel_api_key_index = Some(1);
     let rows = vec![retried];
     let hidden = [DisplayField::Tokens, DisplayField::Cache];
     let v = view(&rows, &hidden);
@@ -123,7 +128,7 @@ fn a_retry_count_is_red_and_its_absence_wears_the_status_colour() {
     let rows = vec![row()];
     let v = view(&rows, &[]);
     let column = Column::Field(DisplayField::Retry);
-    assert_eq!(column.text(&rows[0], 0), fmt::DASH);
+    assert_eq!(column.text(&rows[0], 0), fmt::BLANK);
     assert_eq!(
         column.color(&rows[0], &v, &[], &[]),
         theme::status_color(Status::Completed)
@@ -174,28 +179,32 @@ fn the_marks_name_the_flag_and_their_colour_says_whether_it_is_set() {
 }
 
 #[test]
-fn a_cell_without_data_shows_a_dash_in_the_row_status_colour() {
+fn a_cell_without_data_stays_blank_in_the_row_status_colour() {
     // A request still in flight has nothing to report yet: no cache rate, no
-    // speed, no latency. Each of those cells keeps its dash, but the dash
-    // wears the row's status colour instead of the usual grey.
+    // speed, no latency. Each of those cells stays blank, while the colour
+    // remains the row's status colour rather than the usual grey.
     let mut pending = row();
     pending.status = Status::Pending;
     let v = view(&[], &[]);
     for field in [
+        DisplayField::UpstreamModel,
         DisplayField::Caller,
+        DisplayField::ChannelAPIKeyIndex,
         DisplayField::Cost,
         DisplayField::Retry,
         DisplayField::Account,
         DisplayField::Cache,
+        DisplayField::CacheWrite,
+        DisplayField::CostBreakdown,
         DisplayField::Speed,
         DisplayField::Latency,
     ] {
         let column = Column::Field(field);
-        assert_eq!(column.text(&pending, 0), fmt::DASH, "{field:?} placeholder");
+        assert_eq!(column.text(&pending, 0), fmt::BLANK, "{field:?} blank");
         assert_eq!(
             column.color(&pending, &v, &[], &[]),
             theme::status_color(Status::Pending),
-            "{field:?} placeholder colour"
+            "{field:?} blank colour"
         );
     }
     // The status column always has something to say: its dot.
@@ -203,7 +212,7 @@ fn a_cell_without_data_shows_a_dash_in_the_row_status_colour() {
 }
 
 #[test]
-fn data_replaces_the_dash_as_soon_as_it_exists() {
+fn data_replaces_the_blank_as_soon_as_it_exists() {
     let mut done = row();
     done.status = Status::Completed;
     done.total_tokens = 12_300;
@@ -259,4 +268,92 @@ fn a_cache_rate_wins_over_the_failure_code() {
     let column = Column::Field(DisplayField::Cache);
     assert_eq!(column.text(&recovered, 0), "80.00%");
     assert_eq!(column.color(&recovered, &v, &[], &[]), theme::GREEN);
+}
+
+#[test]
+fn the_new_columns_show_their_actual_values() {
+    let mut rich = row();
+    rich.upstream_model = Some("openai/actual-upstream".into());
+    rich.channel_api_key_index = Some(0);
+    rich.write_cached_tokens = 1536;
+    rich.total_cost = Some(0.03);
+    rich.cost_items = vec![
+        CostItem {
+            item_code: "prompt_tokens".into(),
+            quantity: 900,
+            subtotal: 0.01,
+            tier_breakdown: Vec::new(),
+        },
+        CostItem {
+            item_code: "completion_tokens".into(),
+            quantity: 300,
+            subtotal: 0.02,
+            tier_breakdown: vec![TierCost {
+                up_to: Some(1_000),
+                units: 300,
+                subtotal: 0.02,
+            }],
+        },
+    ];
+    let rows = [rich.clone()];
+    let v = view(&rows, &[]);
+    assert_eq!(
+        Column::Field(DisplayField::UpstreamModel).text(&rich, 0),
+        "actual-upstream",
+        "the provider prefix is stripped, like the model column"
+    );
+    assert_eq!(
+        Column::Field(DisplayField::ChannelAPIKeyIndex).text(&rich, 0),
+        "Key #0",
+        "the raw index is not renumbered"
+    );
+    assert_eq!(
+        Column::Field(DisplayField::CacheWrite).text(&rich, 0),
+        "写 1.5k"
+    );
+    assert_eq!(
+        Column::Field(DisplayField::CostBreakdown).text(&rich, 0),
+        "入 $0.0100 · 出 $0.0200"
+    );
+    assert_eq!(
+        Column::Field(DisplayField::CostBreakdown).color(&rich, &v, &[], &[]),
+        theme::YELLOW
+    );
+}
+
+#[test]
+fn a_key_alias_replaces_the_index_but_keeps_the_same_column_switch() {
+    let mut mapped = row();
+    mapped.channel_api_key_index = Some(2);
+    mapped.channel_key_label = Some("my-k2".into());
+    let column = Column::Field(DisplayField::ChannelAPIKeyIndex);
+    assert_eq!(column.text(&mapped, 0), "my-k2");
+    let rows = [mapped];
+    let hidden = [DisplayField::ChannelAPIKeyIndex];
+    assert!(!Column::all(&view(&rows, &hidden)).contains(&column));
+}
+
+#[test]
+fn the_four_new_columns_toggle_independently() {
+    let mut keyed = row();
+    keyed.channel_api_key_index = Some(1);
+    let rows = vec![keyed];
+    let new_fields = [
+        DisplayField::UpstreamModel,
+        DisplayField::ChannelAPIKeyIndex,
+        DisplayField::CacheWrite,
+        DisplayField::CostBreakdown,
+    ];
+    for hidden_field in new_fields {
+        let hidden = [hidden_field];
+        let v = view(&rows, &hidden);
+        let columns = Column::all(&v);
+        for field in new_fields {
+            assert_eq!(
+                columns.contains(&Column::Field(field)),
+                field != hidden_field,
+                "hiding {hidden_field:?} should only remove itself"
+            );
+        }
+    }
 }

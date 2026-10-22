@@ -303,6 +303,14 @@ impl App {
     /// applied here: the worker sends them as `statusIn`.
     pub fn rebuild(&mut self) {
         let mut rows = self.axon_rows.clone();
+        for row in &mut rows {
+            row.channel_key_label = crate::config::channel_key_text(
+                &self.config.channel_key_aliases,
+                &row.account_id,
+                row.channel.as_deref(),
+                row.channel_api_key_index,
+            );
+        }
         // The rows from the worker keep the wire model ids; the display list is
         // the one place abbreviations are applied, so the panel and the detail
         // popup (both read from here) show the same short names. Re-applied on
@@ -314,6 +322,12 @@ impl App {
                 if let Some(routed) = row.routed_model.as_deref().map(str::to_string) {
                     row.routed_model = Some(model::display_model_name(
                         &routed,
+                        &self.config.model_aliases,
+                    ));
+                }
+                if let Some(upstream) = row.upstream_model.as_deref().map(str::to_string) {
+                    row.upstream_model = Some(model::display_model_name(
+                        &upstream,
                         &self.config.model_aliases,
                     ));
                 }

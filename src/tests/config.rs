@@ -178,10 +178,11 @@ fn a_config_without_single_line_keeps_two_line_cards() {
 }
 
 #[test]
-fn a_config_without_table_mode_keeps_the_card_layout() {
-    // Same for the table: an older file starts on cards, not in a table.
+fn a_config_without_table_mode_starts_in_the_table() {
+    // The table is the default view, so an older file without the key lands
+    // there too.
     let back: Config = serde_json::from_str("{}").unwrap();
-    assert!(!back.table_mode);
+    assert!(back.table_mode);
 }
 
 #[test]
@@ -209,12 +210,27 @@ fn every_card_cell_starts_visible_and_can_be_switched_off() {
 #[test]
 fn hidden_fields_round_trip_as_camel_case_names() {
     let config = Config {
-        hidden_fields: vec![DisplayField::PassThrough, DisplayField::CreatedAt],
+        hidden_fields: vec![
+            DisplayField::PassThrough,
+            DisplayField::CreatedAt,
+            DisplayField::UpstreamModel,
+            DisplayField::ChannelAPIKeyIndex,
+            DisplayField::CacheWrite,
+            DisplayField::CostBreakdown,
+        ],
         ..Config::default()
     };
     let json = serde_json::to_string(&config).unwrap();
     assert!(json.contains("\"passThrough\""), "{json}");
     assert!(json.contains("\"createdAt\""), "{json}");
+    for name in [
+        "upstreamModel",
+        "channelAPIKeyIndex",
+        "cacheWrite",
+        "costBreakdown",
+    ] {
+        assert!(json.contains(&format!("\"{name}\"")), "{json}");
+    }
 
     let back: Config = serde_json::from_str(&json).unwrap();
     assert_eq!(back.hidden_fields, config.hidden_fields);
@@ -222,6 +238,64 @@ fn hidden_fields_round_trip_as_camel_case_names() {
     // A file written before the setting existed shows everything.
     let older: Config = serde_json::from_str("{}").unwrap();
     assert!(older.hidden_fields.is_empty());
+}
+
+#[test]
+fn key_aliases_are_scoped_to_account_channel_and_exact_index() {
+    let mut config = Config::default();
+    assert!(config.upsert_channel_key_alias("a1", "A", 2, "my-k2"));
+    assert!(config.upsert_channel_key_alias("a2", "A", 2, "other-k2"));
+    assert!(config.upsert_channel_key_alias("a1", "B", 2, "b-k2"));
+    assert!(config.upsert_channel_key_alias("a1", "A", 0, "first"));
+    let text = |account, channel, index| {
+        channel_key_text(&config.channel_key_aliases, account, channel, index)
+    };
+    assert_eq!(text("a1", Some("A"), Some(2)).as_deref(), Some("my-k2"));
+    assert_eq!(text("a2", Some("A"), Some(2)).as_deref(), Some("other-k2"));
+    assert_eq!(text("a1", Some("B"), Some(2)).as_deref(), Some("b-k2"));
+    assert_eq!(text("a1", Some("A"), Some(0)).as_deref(), Some("first"));
+    assert_eq!(text("a1", Some("A"), Some(3)).as_deref(), Some("Key #3"));
+    assert_eq!(text("a1", Some("a"), Some(2)).as_deref(), Some("Key #2"));
+    assert_eq!(text("a3", Some("A"), Some(2)).as_deref(), Some("Key #2"));
+    assert_eq!(text("a1", None, Some(2)).as_deref(), Some("Key #2"));
+    assert!(text("a1", Some("A"), None).is_none());
+}
+
+#[test]
+fn key_alias_updates_trim_inputs_and_reject_invalid_values() {
+    let mut config = Config::default();
+    assert!(config.upsert_channel_key_alias(" a1 ", " A ", 2, " my-k2 "));
+    assert!(config.upsert_channel_key_alias("a1", "A", 2, "另一个别名"));
+    assert_eq!(config.channel_key_aliases.len(), 1);
+    assert_eq!(config.channel_key_aliases[0].alias, "另一个别名");
+    for (account, channel, index, alias) in [
+        ("", "A", 2, "name"),
+        ("a1", " ", 2, "name"),
+        ("a1", "A", -1, "name"),
+        ("a1", "A", 2, " "),
+    ] {
+        assert!(!config.upsert_channel_key_alias(account, channel, index, alias));
+    }
+    assert_eq!(config.channel_key_aliases[0].alias, "另一个别名");
+    config.remove_channel_key_alias(99);
+    assert_eq!(config.channel_key_aliases.len(), 1);
+    config.remove_channel_key_alias(0);
+    assert!(config.channel_key_aliases.is_empty());
+}
+
+#[test]
+fn key_aliases_round_trip_and_old_configs_start_without_mappings() {
+    let mut config = Config::default();
+    config.upsert_channel_key_alias("a1", "A", 2, "my-k2");
+    let json = serde_json::to_string(&config).unwrap();
+    assert!(json.contains("\"channelKeyAliases\""), "{json}");
+    assert!(json.contains("\"keyIndex\":2"), "{json}");
+    let back: Config = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.channel_key_aliases, config.channel_key_aliases);
+    let old: Config = serde_json::from_str("{}").unwrap();
+    assert!(old.channel_key_aliases.is_empty());
+    config.remove_account("a1");
+    assert!(config.channel_key_aliases.is_empty());
 }
 
 #[test]

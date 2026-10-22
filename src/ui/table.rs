@@ -43,9 +43,8 @@ enum Column {
 }
 
 impl Column {
-    /// Every column of the table, in draw order. A retry column with no retry
-    /// under it is dropped — retries are the exception, so on most pages the
-    /// column would only ever be noise.
+    /// Every column of the table, in draw order. Retry and channel-key columns
+    /// are dropped when none of the current rows has anything to show.
     fn all(v: &ListView) -> Vec<Column> {
         let mut out = vec![Column::Status];
         for field in DisplayField::ALL {
@@ -53,6 +52,11 @@ impl Column {
                 continue;
             }
             if field == DisplayField::Retry && !v.rows.iter().any(has_retry) {
+                continue;
+            }
+            if field == DisplayField::ChannelAPIKeyIndex
+                && !v.rows.iter().any(|row| row.channel_api_key_index.is_some())
+            {
                 continue;
             }
             out.push(Column::Field(field));
@@ -63,9 +67,8 @@ impl Column {
     /// The cell's value, or `None` when the row has none for this column.
     ///
     /// Missing is not the same as empty: a request still in flight has no
-    /// cache rate, no speed and no latency yet. `text` answers with a dash and
-    /// `color` with the row's status, so the gap reads as "not yet" in the
-    /// colour of whatever the request is doing.
+    /// cache rate, no speed and no latency yet. `text` answers with nothing,
+    /// so the cell stays blank until the value exists.
     fn value(self, row: &Row, now: i64) -> Option<String> {
         match self {
             Column::Status => Some(STATUS_DOT.into()),
@@ -78,9 +81,11 @@ impl Column {
                 DisplayField::Conversion => Some("转".into()),
                 DisplayField::PassThrough => Some("透".into()),
                 DisplayField::Model => Some(row.display_model()),
+                DisplayField::UpstreamModel => panel::upstream_model_text(row),
                 DisplayField::Protocol => text(row.format.as_deref()),
                 DisplayField::Caller => text(row.caller.as_deref()),
                 DisplayField::Channel => text(row.channel.as_deref()),
+                DisplayField::ChannelAPIKeyIndex => panel::key_index_text(row),
                 DisplayField::Tokens => {
                     (row.total_tokens > 0).then(|| fmt::tokens_compact(row.total_tokens))
                 }
@@ -91,11 +96,13 @@ impl Column {
                     .cache_hit_rate()
                     .map(|rate| format!("{rate:.2}%"))
                     .or_else(|| row.error_status_code.map(|code| code.to_string())),
+                DisplayField::CacheWrite => panel::cache_write_text(row),
                 DisplayField::Speed => row.tps().map(|tps| format!("{tps:.0} tps")),
                 DisplayField::Retry => {
                     has_retry(row).then(|| format!("{}×", row.attempt_count - 1))
                 }
                 DisplayField::Cost => row.total_cost.map(fmt::cost),
+                DisplayField::CostBreakdown => row.cost_breakdown_text(),
                 DisplayField::Latency => fmt::latency(row.latency_ms, row.first_token_ms),
                 DisplayField::Completion => completion_text(row),
                 DisplayField::Source => source_text(row),
@@ -110,17 +117,15 @@ impl Column {
         }
     }
 
-    /// What the cell draws: its value, or a dash standing in for a value the
-    /// row does not have yet. The dash is drawn in the row's status colour
-    /// (see `color`), so an empty cell still says what the request is doing.
+    /// What the cell draws: its value, or nothing at all when the row does not
+    /// have one yet.
     fn text(self, row: &Row, now: i64) -> String {
-        self.value(row, now).unwrap_or_else(|| fmt::DASH.into())
+        self.value(row, now).unwrap_or_default()
     }
 
     /// The colour the cell is drawn with, matching the card layouts. A cell
-    /// with no value draws a dash in the row's status colour — the same colour
-    /// the first column shows — so a missing reading is still readable as
-    /// "not yet, and here is how it is going".
+    /// with no value keeps the row's status colour — the same colour the first
+    /// column shows — so a missing reading still reads as "not yet".
     fn color(
         self,
         row: &Row,
@@ -160,6 +165,7 @@ impl Column {
                     .find(|(name, _)| *name == row.served_model())
                     .map(|(_, color)| *color)
                     .unwrap_or(theme::TEXT),
+                DisplayField::UpstreamModel => theme::TEXT_DIM,
                 DisplayField::Protocol => theme::TEXT_DIM,
                 DisplayField::Caller => theme::TEXT_FAINT,
                 DisplayField::Channel => channels
@@ -167,6 +173,7 @@ impl Column {
                     .find(|(name, _)| Some(*name) == row.channel.as_deref())
                     .map(|(_, color)| *color)
                     .unwrap_or(theme::CYAN),
+                DisplayField::ChannelAPIKeyIndex => theme::TEXT_FAINT,
                 DisplayField::Tokens => theme::TEXT_DIM,
                 DisplayField::Cache => match row.cache_hit_rate() {
                     Some(_) if row.cache_hit_is_low() => theme::RED,
@@ -175,11 +182,12 @@ impl Column {
                     // status code, which is the reason the request ended.
                     None => theme::RED,
                 },
+                DisplayField::CacheWrite => theme::TEXT_DIM,
                 DisplayField::Speed => theme::TEXT_DIM,
                 // Reached only when a retry count is on screen; a missing one
                 // was answered with the status dot above.
                 DisplayField::Retry => theme::RED,
-                DisplayField::Cost => theme::YELLOW,
+                DisplayField::Cost | DisplayField::CostBreakdown => theme::YELLOW,
                 DisplayField::Latency | DisplayField::Completion => theme::TEXT_DIM,
                 DisplayField::Source => theme::TEXT_FAINT,
                 DisplayField::Account => panel::account_color(v.accounts, &row.account_id),
@@ -190,7 +198,7 @@ impl Column {
 }
 
 /// A retry happened only when the request was attempted more than once;
-/// a first attempt — or none yet — leaves the cell with its placeholder.
+/// a first attempt — or none yet — leaves the cell blank.
 fn has_retry(row: &Row) -> bool {
     row.attempt_count > 1
 }

@@ -13,10 +13,12 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
 
 use crate::app::{LoginTarget, View};
-use crate::config::{FONT_SIZE_MAX, FONT_SIZE_MIN, OPACITY_MAX, OPACITY_MIN, WindowState};
+use crate::config::{
+    FONT_SIZE_MAX, FONT_SIZE_MIN, HiddenChannel, OPACITY_MAX, OPACITY_MIN, WindowState,
+};
 use crate::theme::Fonts;
 use crate::ui::font_search::{self, SearchBox};
-use crate::ui::layout::Rect;
+use crate::ui::layout::{LayoutMode, Rect};
 use crate::ui::login::LoginForm;
 use crate::ui::settings::{self, Action, Layout};
 use crate::worker::Command;
@@ -37,6 +39,13 @@ pub struct Popup {
     /// Model-alias form: the prefix to match and its short form.
     alias_from: Option<SearchBox>,
     alias_to: Option<SearchBox>,
+    /// Channel-key form: credential index and display alias.
+    key_index: Option<SearchBox>,
+    key_alias: Option<SearchBox>,
+    /// Seeds for the key boxes. They are only read when a box is created, so
+    /// an "编辑" click can prefill a box that is currently scrolled out of view.
+    key_index_seed: String,
+    key_alias_seed: String,
 }
 
 /// Restore the panel after editing an account, including a previously open form.
@@ -138,6 +147,10 @@ pub fn open(owner: HWND, point: POINT) {
             opacity: None,
             alias_from: None,
             alias_to: None,
+            key_index: None,
+            key_alias: None,
+            key_index_seed: String::new(),
+            key_alias_seed: String::new(),
         })
     });
     crate::apply_window_chrome(hwnd);
@@ -191,10 +204,12 @@ fn sync_edit_boxes(hwnd: HWND) {
             format!("{}", s.app.config.font_size),
             format!("{}", s.app.config.opacity),
             p.ui.scroll,
+            p.key_index_seed.clone(),
+            p.key_alias_seed.clone(),
         ))
     })
     .flatten();
-    let Some((query, size_text, opacity_text, scroll)) = state else {
+    let Some((query, size_text, opacity_text, scroll, index_seed, alias_seed)) = state else {
         return;
     };
     let search = layout.edit_box_rect(&Action::FontSearch, scroll);
@@ -202,6 +217,8 @@ fn sync_edit_boxes(hwnd: HWND) {
     let opacity = layout.edit_box_rect(&Action::OpacityInput, scroll);
     let alias_from = layout.edit_box_rect(&Action::AliasFromInput, scroll);
     let alias_to = layout.edit_box_rect(&Action::AliasToInput, scroll);
+    let key_index = layout.edit_box_rect(&Action::KeyIndexInput, scroll);
+    let key_alias = layout.edit_box_rect(&Action::KeyAliasInput, scroll);
     sync_box(hwnd, search, &query, font_search::ID, search_slot);
     sync_box(hwnd, size, &size_text, font_search::SIZE_ID, size_slot);
     sync_box(
@@ -220,6 +237,20 @@ fn sync_edit_boxes(hwnd: HWND) {
         alias_from_slot,
     );
     sync_box(hwnd, alias_to, "", font_search::ALIAS_TO_ID, alias_to_slot);
+    sync_box(
+        hwnd,
+        key_index,
+        &index_seed,
+        font_search::KEY_INDEX_ID,
+        key_index_slot,
+    );
+    sync_box(
+        hwnd,
+        key_alias,
+        &alias_seed,
+        font_search::KEY_ALIAS_ID,
+        key_alias_slot,
+    );
 }
 
 fn search_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
@@ -237,6 +268,12 @@ fn alias_from_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
 }
 fn alias_to_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
     &mut popup.alias_to
+}
+fn key_index_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
+    &mut popup.key_index
+}
+fn key_alias_slot(popup: &mut Popup) -> &mut Option<SearchBox> {
+    &mut popup.key_alias
 }
 
 /// Place one native edit box over its layout cell: create it on first use,
@@ -320,6 +357,8 @@ fn focus_control(hwnd: HWND, select_all: bool) {
             Some(Action::OpacityInput) => p.opacity.as_ref().map(|b| b.hwnd),
             Some(Action::AliasFromInput) => p.alias_from.as_ref().map(|b| b.hwnd),
             Some(Action::AliasToInput) => p.alias_to.as_ref().map(|b| b.hwnd),
+            Some(Action::KeyIndexInput) => p.key_index.as_ref().map(|b| b.hwnd),
+            Some(Action::KeyAliasInput) => p.key_alias.as_ref().map(|b| b.hwnd),
             _ => None,
         }
     })
@@ -392,6 +431,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                         p.ui.focus = Some(Action::AliasFromInput);
                     } else if p.alias_to.as_ref().is_some_and(|b| b.hwnd == focused) {
                         p.ui.focus = Some(Action::AliasToInput);
+                    } else if p.key_index.as_ref().is_some_and(|b| b.hwnd == focused) {
+                        p.ui.focus = Some(Action::KeyIndexInput);
+                    } else if p.key_alias.as_ref().is_some_and(|b| b.hwnd == focused) {
+                        p.ui.focus = Some(Action::KeyAliasInput);
                     }
                 }
             });
@@ -406,6 +449,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     p.opacity.as_ref(),
                     p.alias_from.as_ref(),
                     p.alias_to.as_ref(),
+                    p.key_index.as_ref(),
+                    p.key_alias.as_ref(),
                 ]
                 .into_iter()
                 .flatten()
@@ -690,6 +735,13 @@ fn key(hwnd: HWND, key: u16) {
         {
             // Enter inside either alias box adds the mapping.
             dispatch(hwnd, Action::AddAlias);
+        } else if matches!(
+            focused,
+            Some(Action::KeyIndexInput) | Some(Action::KeyAliasInput)
+        ) && key == VK_RETURN.0
+        {
+            // Enter inside either key box adds or updates the mapping.
+            dispatch(hwnd, Action::AddKeyAlias);
         } else if let Some(action) = focused {
             dispatch(hwnd, action);
         }
@@ -706,6 +758,29 @@ fn key(hwnd: HWND, key: u16) {
         };
         scroll(hwnd, delta);
     }
+}
+
+/// Pick the first target once, when the Key subpage is entered. Re-entering
+/// with a target already frozen (or no channels yet) changes nothing.
+fn ensure_key_target() {
+    PanelState::with(|s| {
+        let targets = settings::key_targets(&s.app);
+        if let Some(p) = s.settings.as_mut() {
+            p.ui.ensure_key_alias_target(&targets);
+        }
+    });
+}
+
+/// Surface a rejected key-mapping attempt next to the native form.
+fn set_key_error(message: &str) {
+    PanelState::with(|s| {
+        if let Some(p) = s.settings.as_mut() {
+            p.ui.key_alias_error = Some(message.to_string());
+            p.ui.focus = Some(Action::KeyIndexInput);
+        }
+    });
+    // The caller may return before the usual end-of-dispatch redraw.
+    redraw();
 }
 
 fn dispatch(hwnd: HWND, action: Action) {
@@ -740,6 +815,14 @@ fn dispatch(hwnd: HWND, action: Action) {
                     });
                 }
             });
+            if tab == settings::Tab::Models {
+                let on_key_page =
+                    PanelState::with(|s| s.settings.as_ref().is_some_and(|p| p.ui.mapping_keys))
+                        .unwrap_or(false);
+                if on_key_page {
+                    ensure_key_target();
+                }
+            }
             sync_edit_boxes(hwnd);
             focus_control(hwnd, false);
         }
@@ -749,12 +832,14 @@ fn dispatch(hwnd: HWND, action: Action) {
                 s.app.config.toggle_field(field);
                 s.app.save();
             });
+            actions.push(PanelAction::RedrawDetail);
         }
         Action::ShowAllFields => {
             PanelState::with(|s| {
                 s.app.config.show_all_fields();
                 s.app.save();
             });
+            actions.push(PanelAction::RedrawDetail);
         }
         Action::FontSizeInput => focus_control(hwnd, true),
         Action::SaveFontSize => {
@@ -802,8 +887,24 @@ fn dispatch(hwnd: HWND, action: Action) {
         }
         Action::FontFamily(name) => actions.push(PanelAction::SetFontFamily(name)),
         Action::FontSearch => focus_control(hwnd, false),
-        Action::SingleLine => crate::on_command(WPARAM(crate::MENU_SINGLE_LINE), &mut actions),
-        Action::TableMode => crate::on_command(WPARAM(crate::MENU_TABLE_MODE), &mut actions),
+        // The settings window has one checkbox per layout, but the layouts are
+        // exclusive: switching one on switches the others off.
+        Action::SingleLine => {
+            let on = !PanelState::with(|s| s.app.config.single_line).unwrap_or(false);
+            actions.push(PanelAction::SetDisplayMode(if on {
+                LayoutMode::SingleLine
+            } else {
+                LayoutMode::Cards
+            }));
+        }
+        Action::TableMode => {
+            let on = !PanelState::with(|s| s.app.config.table_mode).unwrap_or(false);
+            actions.push(PanelAction::SetDisplayMode(if on {
+                LayoutMode::Table
+            } else {
+                LayoutMode::Cards
+            }));
+        }
         Action::Pin => crate::on_command(WPARAM(crate::MENU_PIN_POSITION), &mut actions),
         Action::Topmost => crate::on_command(WPARAM(crate::MENU_TOPMOST), &mut actions),
         Action::Bottommost => crate::on_command(WPARAM(crate::MENU_BOTTOMMOST), &mut actions),
@@ -902,6 +1003,150 @@ fn dispatch(hwnd: HWND, action: Action) {
             });
         }
         Action::AliasFromInput | Action::AliasToInput => focus_control(hwnd, true),
+        Action::MappingPage(keys) => {
+            PanelState::with(|s| {
+                if let Some(p) = s.settings.as_mut() {
+                    p.ui.mapping_keys = keys;
+                    p.ui.scroll = 0.0;
+                    p.ui.hover = None;
+                    p.ui.pressed = None;
+                    p.ui.focus = Some(Action::MappingPage(keys));
+                    // A verdict from the other form would only confuse.
+                    p.ui.key_alias_error = None;
+                }
+            });
+            if keys {
+                ensure_key_target();
+            }
+            // The native boxes appear and disappear with the subpage.
+            sync_edit_boxes(hwnd);
+            focus_control(hwnd, false);
+        }
+        Action::KeyTarget(entry) => {
+            PanelState::with(|s| {
+                if let Some(p) = s.settings.as_mut() {
+                    p.ui.key_alias_target = Some(entry.clone());
+                    p.ui.focus = Some(Action::KeyTarget(entry));
+                    p.ui.key_alias_error = None;
+                }
+            });
+        }
+        Action::KeyIndexInput | Action::KeyAliasInput => focus_control(hwnd, true),
+        Action::AddKeyAlias => {
+            let form = PanelState::with(|s| {
+                let p = s.settings.as_ref()?;
+                // The target was frozen on entering the subpage; never pick a
+                // different one here from a freshly polled target list.
+                Some((
+                    p.ui.key_alias_target.clone(),
+                    p.key_index.as_ref().map(|b| b.hwnd),
+                    p.key_alias.as_ref().map(|b| b.hwnd),
+                ))
+            })
+            .flatten();
+            let Some((target, index_box, alias_box)) = form else {
+                return;
+            };
+            let Some(target) = target else {
+                set_key_error("请先选择目标账号和渠道；抓取到请求后会出现目标");
+                return;
+            };
+            let (Some(index_box), Some(alias_box)) = (index_box, alias_box) else {
+                set_key_error("Key 输入框尚未就绪，请稍后重试");
+                return;
+            };
+            let Some(index) = settings::normalize_key_index(&font_search::query(index_box)) else {
+                set_key_error("Key 索引必须是非负整数，例如 0、2");
+                return;
+            };
+            let alias = font_search::query(alias_box).trim().to_string();
+            if alias.is_empty() {
+                set_key_error("别名不能为空，请填写用于显示的短名称");
+                return;
+            }
+            let (account_id, channel) = (target.account_id.clone(), target.channel.clone());
+            let saved = PanelState::with(|s| {
+                let ok =
+                    s.app
+                        .config
+                        .upsert_channel_key_alias(&account_id, &channel, index, &alias);
+                if let Some(p) = s.settings.as_mut() {
+                    p.ui.key_alias_error = if ok {
+                        None
+                    } else {
+                        Some("无法保存该映射，请检查账号、渠道和索引".into())
+                    };
+                }
+                if ok {
+                    s.app.save();
+                    // Visible cards and an open detail popup pick it up now.
+                    s.app.rebuild();
+                }
+                Some(ok)
+            })
+            .flatten()
+            .unwrap_or(false);
+            if saved {
+                font_search::set_text(index_box, "");
+                font_search::set_text(alias_box, "");
+                PanelState::with(|s| {
+                    if let Some(p) = s.settings.as_mut() {
+                        p.key_index_seed.clear();
+                        p.key_alias_seed.clear();
+                    }
+                });
+                actions.push(PanelAction::RedrawDetail);
+            }
+        }
+        Action::EditKeyAlias(index) => {
+            let loaded = PanelState::with(|s| {
+                let alias = s.app.config.channel_key_aliases.get(index)?;
+                let target = HiddenChannel {
+                    account_id: alias.account_id.clone(),
+                    channel: alias.channel.clone(),
+                };
+                let loaded = (alias.key_index, alias.alias.clone());
+                let p = s.settings.as_mut()?;
+                p.ui.mapping_keys = true;
+                p.ui.key_alias_target = Some(target);
+                p.ui.key_alias_error = None;
+                p.ui.focus = Some(Action::KeyIndexInput);
+                // Bring the native form back into view before seeding it.
+                p.ui.scroll = 0.0;
+                p.key_index_seed = loaded.0.to_string();
+                p.key_alias_seed = loaded.1.clone();
+                Some(loaded)
+            })
+            .flatten();
+            if let Some((index, alias)) = loaded {
+                // Make sure the boxes exist and are placed before seeding them.
+                sync_edit_boxes(hwnd);
+                let boxes = PanelState::with(|s| {
+                    let p = s.settings.as_ref()?;
+                    Some((
+                        p.key_index.as_ref().map(|b| b.hwnd),
+                        p.key_alias.as_ref().map(|b| b.hwnd),
+                    ))
+                })
+                .flatten();
+                if let Some((Some(index_box), Some(alias_box))) = boxes {
+                    font_search::set_text(index_box, &index.to_string());
+                    font_search::set_text(alias_box, &alias);
+                }
+                focus_control(hwnd, false);
+            }
+        }
+        Action::RemoveKeyAlias(index) => {
+            PanelState::with(|s| {
+                s.app.config.remove_channel_key_alias(index);
+                s.app.save();
+                s.app.rebuild();
+                if let Some(p) = s.settings.as_mut() {
+                    p.ui.key_alias_error = None;
+                }
+            });
+            actions.push(PanelAction::RedrawDetail);
+        }
         Action::AddAlias => {
             let boxes = PanelState::with(|s| {
                 let p = s.settings.as_ref()?;

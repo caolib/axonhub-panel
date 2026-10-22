@@ -26,6 +26,10 @@ pub const OPACITY_ID: usize = 2102;
 /// free text, so they must not be read as the numeric boxes above.
 pub const ALIAS_FROM_ID: usize = 2103;
 pub const ALIAS_TO_ID: usize = 2104;
+/// The channel-key form: the credential index, then its display alias. The
+/// index is an integer, so a pasted `2.5` is still rejected when it is applied.
+pub const KEY_INDEX_ID: usize = 2105;
+pub const KEY_ALIAS_ID: usize = 2106;
 pub const WM_SEARCH_FOCUS: u32 = WM_APP + 42;
 const EM_LIMITTEXT: u32 = 0x00C5;
 const EM_SETSEL: u32 = 0x00B1;
@@ -33,6 +37,11 @@ const EM_SETSEL: u32 = 0x00B1;
 /// The only boxes that restrict typing to digits; every other id is free text.
 fn numeric_id(id: usize) -> bool {
     matches!(id, SIZE_ID | OPACITY_ID)
+}
+
+/// Unlike the decimal boxes above, a key index has no fractional part.
+fn integer_id(id: usize) -> bool {
+    id == KEY_INDEX_ID
 }
 
 pub struct SearchBox {
@@ -92,14 +101,16 @@ impl SearchBox {
             font: font(scale),
             scale,
         };
+        let limit = if integer_id(id) {
+            9
+        } else if numeric {
+            6
+        } else {
+            128
+        };
         unsafe {
             let _ = SetWindowSubclass(hwnd, Some(edit_proc), id, parent.0 as usize);
-            SendMessageW(
-                hwnd,
-                EM_LIMITTEXT,
-                Some(WPARAM(if numeric { 6 } else { 128 })),
-                None,
-            );
+            SendMessageW(hwnd, EM_LIMITTEXT, Some(WPARAM(limit)), None);
             SendMessageW(
                 hwnd,
                 WM_SETFONT,
@@ -157,6 +168,12 @@ fn numeric_char(ch: usize) -> bool {
     ch < 0x20 || (0x30..=0x39).contains(&ch) || ch == 0x2E
 }
 
+/// The key index never needs a decimal point. Paste is not filtered here, so
+/// `AddKeyAlias` parses the whole text again before applying it.
+fn integer_char(ch: usize) -> bool {
+    ch < 0x20 || (0x30..=0x39).contains(&ch)
+}
+
 unsafe extern "system" fn edit_proc(
     hwnd: HWND,
     msg: u32,
@@ -190,6 +207,7 @@ unsafe extern "system" fn edit_proc(
         }
         WM_CHAR if [9, 13, 27].contains(&wp.0) => return LRESULT(0),
         WM_CHAR if numeric_id(id) && !numeric_char(wp.0) => return LRESULT(0),
+        WM_CHAR if integer_id(id) && !integer_char(wp.0) => return LRESULT(0),
         WM_MOUSEWHEEL => return unsafe { SendMessageW(parent, msg, Some(wp), Some(lp)) },
         WM_NCDESTROY => unsafe {
             let _ = RemoveWindowSubclass(hwnd, Some(edit_proc), id);

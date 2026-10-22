@@ -11,9 +11,9 @@
 
 use windows::Win32::Graphics::GdiPlus::RectF;
 
-use crate::config::ModelAlias;
+use crate::config::{DisplayField, ModelAlias};
 use crate::format as fmt;
-use crate::model::{ExecutionDetail, Protocol, Row, display_model_name};
+use crate::model::{ExecutionDetail, Protocol, Row, display_model_name, short_model_name};
 use crate::theme::{self, Fonts, Painter};
 use crate::ui::layout::Rect;
 
@@ -229,6 +229,7 @@ impl Doc {
         now: i64,
         depth: Depth,
         aliases: &[ModelAlias],
+        hidden_fields: &[DisplayField],
     ) -> Doc {
         let mut lines = Vec::new();
         if depth == Depth::Full {
@@ -239,8 +240,22 @@ impl Doc {
                 theme::status_color(row.status),
             ));
             lines.push(field("模型", row.display_model(), theme::TEXT));
+            if shows(hidden_fields, DisplayField::UpstreamModel)
+                && let Some(model) = non_empty(&row.upstream_model)
+            {
+                lines.push(field("上游模型", short_model_name(&model), theme::TEXT_DIM));
+            }
             if let Some(channel) = non_empty(&row.channel) {
                 lines.push(field("渠道", channel, theme::CYAN));
+            }
+            if shows(hidden_fields, DisplayField::ChannelAPIKeyIndex)
+                && let Some(index) = row.channel_api_key_index
+            {
+                lines.push(field(
+                    "渠道 Key",
+                    key_index_text(index, row.channel_key_label.as_deref()),
+                    theme::TEXT_DIM,
+                ));
             }
             if let Some(caller) = non_empty(&row.caller) {
                 lines.push(field("调用者", caller, theme::TEXT_DIM));
@@ -250,10 +265,17 @@ impl Doc {
             }
             lines.push(field("协议", protocol_text(row), theme::TEXT_DIM));
             lines.push(field("流式", yes_no(row.stream), theme::TEXT_DIM));
-            lines.push(field("令牌", tokens_text(row), theme::TEXT_DIM));
+            lines.push(field(
+                "令牌",
+                tokens_text(row, shows(hidden_fields, DisplayField::CacheWrite)),
+                theme::TEXT_DIM,
+            ));
             lines.push(field("耗时", timing_text(row), theme::TEXT_DIM));
             if let Some(cost) = row.total_cost {
                 lines.push(field("费用", fmt::cost(cost), theme::TEXT_DIM));
+            }
+            if shows(hidden_fields, DisplayField::CostBreakdown) {
+                push_cost_breakdown(&mut lines, row);
             }
             lines.push(field(
                 "时间",
@@ -291,9 +313,58 @@ impl Doc {
             ));
         }
         for (index, execution) in executions.iter().enumerate() {
-            push_execution(&mut lines, index, execution, depth, aliases);
+            push_execution(&mut lines, index, execution, depth, aliases, hidden_fields);
         }
         Doc { lines }
+    }
+}
+
+/// Whether a document field is enabled. New routing/cost fields respect the
+/// same switches as the cards; everything older stays always visible, so the
+/// popup keeps its existing behaviour.
+fn shows(hidden_fields: &[DisplayField], field: DisplayField) -> bool {
+    !hidden_fields.contains(&field)
+}
+
+/// A mapped credential name, or the raw index AxonHub reported.
+fn key_index_text(index: i64, alias: Option<&str>) -> String {
+    alias
+        .filter(|label| !label.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Key #{index}"))
+}
+
+/// Compact per-category costs, then one line per item with its quantity,
+/// subtotal and tier breakdown (when the provider reported tiers).
+fn push_cost_breakdown(lines: &mut Vec<Line>, row: &Row) {
+    if let Some(summary) = row.cost_breakdown_text() {
+        lines.push(field("费用明细", summary, theme::TEXT_DIM));
+    }
+    for item in &row.cost_items {
+        if item.quantity <= 0 && item.subtotal <= 0.0 {
+            continue;
+        }
+        let mut value = format!(
+            "{} · 数量 {} · {}",
+            item.label(),
+            item.quantity,
+            fmt::cost(item.subtotal)
+        );
+        if !item.tier_breakdown.is_empty() {
+            let tiers: Vec<String> = item
+                .tier_breakdown
+                .iter()
+                .map(|tier| {
+                    let up_to = tier
+                        .up_to
+                        .map(fmt::tokens_compact)
+                        .unwrap_or_else(|| "∞".into());
+                    format!("{up_to} {}u {}", tier.units, fmt::cost(tier.subtotal))
+                })
+                .collect();
+            value.push_str(&format!(" · 阶梯 {}", tiers.join(" / ")));
+        }
+        lines.push(field("成本项", value, theme::TEXT_DIM));
     }
 }
 
@@ -311,6 +382,7 @@ fn push_execution(
     ex: &ExecutionDetail,
     depth: Depth,
     aliases: &[ModelAlias],
+    hidden_fields: &[DisplayField],
 ) {
     let status = ex.status();
     let mut title = format!("执行 {} · {}", index + 1, status.label());
@@ -350,6 +422,7 @@ fn push_execution(
             let model = display_model_name(&model, aliases);
             lines.push(field("模型", with_effort(model, ex), theme::TEXT));
         }
+        push_execution_routing(lines, ex, aliases, hidden_fields);
         if let Some(message) = non_empty(&ex.error_message) {
             lines.push(field("错误", message, theme::RED));
         }
@@ -361,6 +434,7 @@ fn push_execution(
         let model = display_model_name(&model, aliases);
         lines.push(field("模型", with_effort(model, ex), theme::TEXT));
     }
+    push_execution_routing(lines, ex, aliases, hidden_fields);
     if let Some(span) = span_text(ex.created_at.as_deref(), ex.updated_at.as_deref()) {
         lines.push(field("时间", span, theme::TEXT_DIM));
     }
@@ -383,6 +457,33 @@ fn push_execution(
     lines.push(Line::Gap);
 }
 
+/// The actual upstream model and the channel key index for one attempt.
+fn push_execution_routing(
+    lines: &mut Vec<Line>,
+    ex: &ExecutionDetail,
+    aliases: &[ModelAlias],
+    hidden_fields: &[DisplayField],
+) {
+    if shows(hidden_fields, DisplayField::UpstreamModel)
+        && let Some(model) = non_empty(&ex.upstream_model_id)
+    {
+        lines.push(field(
+            "上游模型",
+            display_model_name(&model, aliases),
+            theme::TEXT_DIM,
+        ));
+    }
+    if shows(hidden_fields, DisplayField::ChannelAPIKeyIndex)
+        && let Some(index) = ex.channel_api_key_index
+    {
+        lines.push(field(
+            "渠道 Key",
+            key_index_text(index, ex.channel_key_label.as_deref()),
+            theme::TEXT_DIM,
+        ));
+    }
+}
+
 /// `glm-5.2(max)`: the model an attempt ran on, with its reasoning effort.
 fn with_effort(model: String, ex: &ExecutionDetail) -> String {
     match non_empty(&ex.reasoning_effort) {
@@ -394,7 +495,7 @@ fn with_effort(model: String, ex: &ExecutionDetail) -> String {
 fn status_code_text(ex: &ExecutionDetail) -> String {
     match ex.response_status_code {
         Some(code) => code.to_string(),
-        None => fmt::DASH.into(),
+        None => fmt::BLANK.into(),
     }
 }
 
@@ -419,8 +520,10 @@ pub fn plain_text(doc: &Doc) -> String {
             }
             Line::Field { label, value, .. } => {
                 out.push_str(label);
-                out.push_str(": ");
-                out.push_str(value);
+                if !value.is_empty() {
+                    out.push_str(": ");
+                    out.push_str(value);
+                }
                 out.push('\n');
             }
             Line::Gap => out.push('\n'),
@@ -447,13 +550,13 @@ fn protocol_text(row: &Row) -> String {
     match row.protocol() {
         Protocol::Same(one) | Protocol::Single(one) => one,
         Protocol::Converted { from, to } => format!("{from} → {to}"),
-        Protocol::Unknown => fmt::DASH.into(),
+        Protocol::Unknown => fmt::BLANK.into(),
     }
 }
 
-fn tokens_text(row: &Row) -> String {
+fn tokens_text(row: &Row, show_cache_write: bool) -> String {
     if row.total_tokens <= 0 {
-        return fmt::DASH.into();
+        return fmt::BLANK.into();
     }
     let mut text = format!(
         "总 {} · 入 {}",
@@ -475,7 +578,7 @@ fn tokens_text(row: &Row) -> String {
     if let Some(rate) = row.cache_hit_rate() {
         text.push_str(&format!(" · 缓存 {rate:.1}%"));
     }
-    if row.write_cached_tokens > 0 {
+    if show_cache_write && row.write_cached_tokens > 0 {
         text.push_str(&format!(
             " · 写入 {}",
             fmt::tokens_compact(row.write_cached_tokens)
@@ -509,7 +612,7 @@ fn timing_text(row: &Row) -> String {
         parts.push(format!("{tps:.0} tps"));
     }
     if parts.is_empty() {
-        fmt::DASH.into()
+        fmt::BLANK.into()
     } else {
         parts.join(" · ")
     }

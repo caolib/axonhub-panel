@@ -32,7 +32,7 @@ query GetRequests($first: Int, $where: RequestWhereInput, $orderBy: RequestOrder
         metricsFirstTokenLatencyMs
         metricsReasoningDurationMs
         executions(first: 10, orderBy: { field: CREATED_AT, direction: DESC }) {
-          edges { node { modelID status format reasoningEffort passThroughApplied responseStatusCode channel { name } } }
+          edges { node { modelID upstreamModelID channelAPIKeyIndex status format reasoningEffort passThroughApplied responseStatusCode channel { name } } }
           totalCount
         }
         usageLogs(first: 1) {
@@ -45,6 +45,12 @@ query GetRequests($first: Int, $where: RequestWhereInput, $orderBy: RequestOrder
               promptCachedTokens
               promptWriteCachedTokens
               totalCost
+              costItems {
+                itemCode
+                quantity
+                subtotal
+                tierBreakdown { upTo units subtotal }
+              }
             }
           }
         }
@@ -69,6 +75,8 @@ query GetRequestExecutions($requestID: ID!, $first: Int, $orderBy: RequestExecut
             createdAt
             updatedAt
             modelID
+            upstreamModelID
+            channelAPIKeyIndex
             format
             reasoningEffort
             passThroughApplied

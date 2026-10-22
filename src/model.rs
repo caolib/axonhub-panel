@@ -116,6 +116,77 @@ impl NamedRef {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CostItem {
+    pub item_code: String,
+    pub quantity: i64,
+    #[serde(deserialize_with = "decimal_amount")]
+    pub subtotal: f64,
+    #[serde(default, deserialize_with = "null_as_empty")]
+    pub tier_breakdown: Vec<TierCost>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TierCost {
+    pub up_to: Option<i64>,
+    pub units: i64,
+    #[serde(deserialize_with = "decimal_amount")]
+    pub subtotal: f64,
+}
+
+/// GraphQL Decimal accepts both a JSON number and a decimal string.
+fn decimal_amount<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Decimal {
+        Number(f64),
+        Text(String),
+    }
+    let value = match Decimal::deserialize(deserializer)? {
+        Decimal::Number(value) => value,
+        Decimal::Text(value) => value.parse::<f64>().map_err(serde::de::Error::custom)?,
+    };
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom("invalid cost amount"))
+    }
+}
+
+fn null_as_empty<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<T>, D::Error> {
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+impl CostItem {
+    pub fn label(&self) -> &str {
+        match self.item_code.as_str() {
+            "prompt_tokens" => "输入",
+            "completion_tokens" => "输出",
+            "prompt_cached_tokens" => "缓存读取",
+            "prompt_write_cached_tokens" => "缓存写入",
+            "prompt_write_cached_tokens_5m" | "prompt_write_cached_tokens5m" => "缓存写入(5m)",
+            "prompt_write_cached_tokens_1h" | "prompt_write_cached_tokens1h" => "缓存写入(1h)",
+            _ => &self.item_code,
+        }
+    }
+
+    fn short_label(&self) -> &str {
+        match self.item_code.as_str() {
+            "prompt_tokens" => "入",
+            "completion_tokens" => "出",
+            "prompt_cached_tokens" => "读",
+            "prompt_write_cached_tokens" => "写",
+            "prompt_write_cached_tokens_5m" | "prompt_write_cached_tokens5m" => "写5m",
+            "prompt_write_cached_tokens_1h" | "prompt_write_cached_tokens1h" => "写1h",
+            _ => self.label(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UsageLog {
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
@@ -126,6 +197,8 @@ pub struct UsageLog {
     /// Billed cost in the account's currency. AxonHub sends a JSON number,
     /// which is a float even when the value is whole.
     pub total_cost: Option<f64>,
+    #[serde(default, deserialize_with = "null_as_empty")]
+    pub cost_items: Vec<CostItem>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,6 +206,10 @@ pub struct UsageLog {
 pub struct Execution {
     #[serde(rename = "modelID")]
     pub model_id: Option<String>,
+    #[serde(rename = "upstreamModelID")]
+    pub upstream_model_id: Option<String>,
+    #[serde(rename = "channelAPIKeyIndex")]
+    pub channel_api_key_index: Option<i64>,
     pub status: Option<String>,
     pub format: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -146,6 +223,8 @@ impl Default for Execution {
     fn default() -> Self {
         Execution {
             model_id: None,
+            upstream_model_id: None,
+            channel_api_key_index: None,
             status: None,
             format: None,
             reasoning_effort: None,
@@ -243,10 +322,16 @@ pub struct ChannelDetail {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionDetail {
+    #[serde(skip)]
+    pub channel_key_label: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     #[serde(rename = "modelID")]
     pub model_id: Option<String>,
+    #[serde(rename = "upstreamModelID")]
+    pub upstream_model_id: Option<String>,
+    #[serde(rename = "channelAPIKeyIndex")]
+    pub channel_api_key_index: Option<i64>,
     pub format: Option<String>,
     pub reasoning_effort: Option<String>,
     pub pass_through_applied: Option<bool>,
@@ -317,7 +402,13 @@ pub struct Row {
     pub model: String,
     /// Execution model when AxonHub routed to a model other than the request.
     pub routed_model: Option<String>,
+    /// Raw model reported upstream, before AxonHub rewrites it for the client.
+    pub upstream_model: Option<String>,
     pub channel: Option<String>,
+    /// Zero-based index of the channel credential used by the latest attempt.
+    pub channel_api_key_index: Option<i64>,
+    /// Resolved display label, filled when rebuilding the account's rows.
+    pub channel_key_label: Option<String>,
     /// Name of the API key the request arrived with.
     pub caller: Option<String>,
     /// Where the request entered (`api`, `playground`, …).
@@ -344,6 +435,7 @@ pub struct Row {
     pub write_cached_tokens: i64,
     /// Billed cost. `None` when the usage log has not arrived yet.
     pub total_cost: Option<f64>,
+    pub cost_items: Vec<CostItem>,
     /// Number of upstream attempts; above one means retries happened.
     pub attempt_count: i64,
     /// How many of the fetched attempts did not succeed. A request that ended
@@ -389,7 +481,10 @@ impl Row {
             status: Status::parse(req.status.as_deref()),
             model: requested_model,
             routed_model,
+            upstream_model: execution.and_then(|e| non_empty_owned(e.upstream_model_id.as_deref())),
             channel,
+            channel_api_key_index: execution.and_then(|e| e.channel_api_key_index),
+            channel_key_label: None,
             caller: req.api_key.as_ref().and_then(NamedRef::non_empty_name),
             source: non_empty_owned(req.source.as_deref()),
             client_ip: non_empty_owned(req.client_ip.as_deref()),
@@ -427,6 +522,7 @@ impl Row {
                 .and_then(|u| u.prompt_write_cached_tokens)
                 .unwrap_or(0),
             total_cost: usage.and_then(|u| u.total_cost).filter(|c| *c > 0.0),
+            cost_items: usage.map(|u| u.cost_items.clone()).unwrap_or_default(),
             attempt_count: req
                 .executions
                 .as_ref()
@@ -474,6 +570,23 @@ impl Row {
                     .find_map(|e| e.response_status_code)
             }),
         }
+    }
+
+    /// Compact per-category amounts; separate from the request's total cost.
+    pub fn cost_breakdown_text(&self) -> Option<String> {
+        let parts: Vec<String> = self
+            .cost_items
+            .iter()
+            .filter(|item| item.quantity > 0 || item.subtotal > 0.0)
+            .map(|item| {
+                format!(
+                    "{} {}",
+                    item.short_label(),
+                    crate::format::cost(item.subtotal)
+                )
+            })
+            .collect();
+        (!parts.is_empty()).then(|| parts.join(" · "))
     }
 
     /// Stamp the row with the account it was polled from, once the caller

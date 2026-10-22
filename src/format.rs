@@ -3,7 +3,7 @@
 /// Compact token count for the primary line of a card.
 pub fn tokens_compact(n: i64) -> String {
     if n <= 0 {
-        return DASH.into();
+        return BLANK.into();
     }
     let f = n as f64;
     if f >= 1_000_000.0 {
@@ -15,7 +15,9 @@ pub fn tokens_compact(n: i64) -> String {
     }
 }
 
-pub const DASH: &str = "—";
+/// What a missing value draws: nothing at all. Named so every call site
+/// agrees and the emptiness reads as deliberate rather than an oversight.
+pub const BLANK: &str = "";
 
 /// Billed cost, e.g. `$0.1388`. Amounts under a dollar keep four places: two
 /// would turn `$0.1388` and `$0.1289` into the same `$0.14` / `$0.13`.
@@ -62,7 +64,7 @@ fn seconds(ms: i64) -> String {
 /// seconds and anything older than a week shows the wall clock.
 pub fn relative_time(iso: Option<&str>, now: i64) -> String {
     let Some(then) = iso.and_then(crate::time::parse_unix) else {
-        return DASH.into();
+        return BLANK.into();
     };
     let delta = now - then;
     if delta < 0 {
@@ -92,7 +94,7 @@ pub fn local_clock(iso: Option<&str>) -> String {
         .and_then(crate::time::local_parts);
     match local {
         Some(p) => format!("{:02}:{:02}:{:02}", p.hour, p.minute, p.second),
-        None => DASH.into(),
+        None => BLANK.into(),
     }
 }
 
@@ -107,7 +109,7 @@ pub fn local_datetime(iso: Option<&str>) -> String {
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
             p.year, p.month, p.day, p.hour, p.minute, p.second
         ),
-        None => DASH.into(),
+        None => BLANK.into(),
     }
 }
 

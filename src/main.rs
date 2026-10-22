@@ -227,10 +227,10 @@ const MENU_ROWS_10: usize = 1401;
 const MENU_ROWS_15: usize = 1402;
 const MENU_ROWS_20: usize = 1403;
 const MENU_QUIT: usize = 1300;
-/// Toggle the one-line card layout.
-const MENU_SINGLE_LINE: usize = 1204;
-/// Toggle the table layout.
-const MENU_TABLE_MODE: usize = 1205;
+/// Display-mode submenu: the three layouts, exactly one checked at a time.
+const MENU_MODE_CARDS: usize = 1204;
+const MENU_MODE_SINGLE_LINE: usize = 1205;
+const MENU_MODE_TABLE: usize = 1206;
 /// Font-size submenu items: `MENU_FONT_BASE` = 10 px, `MENU_FONT_BASE + 14` =
 /// 24 px. The menu lists common integer steps; the settings field accepts
 /// anything in `config::FONT_SIZE_MIN..=FONT_SIZE_MAX`.
@@ -1444,12 +1444,10 @@ enum Action {
     /// Change the panel opacity from the settings field; applied as a layered
     /// window alpha so the whole panel becomes translucent.
     SetOpacity(u8),
-    /// Switch between the two-line and single-line card layouts. The row count
-    /// is kept and the window height refitted to match.
-    SetSingleLine(bool),
-    /// Switch the list to the table layout (or back to cards). The row count is
-    /// kept; the width follows the columns, fitted after the next paint.
-    SetTableMode(bool),
+    /// Switch the list to one of the three layouts. The row count is kept and
+    /// the window refitted; entering the table lets the next paint fit the
+    /// width to its columns, leaving it restores the card width.
+    SetDisplayMode(LayoutMode),
     /// Resize the window to the client width the table's columns asked for.
     FitTableWidth(i32),
     /// Toggle `WS_EX_NOACTIVATE` so the window can (or cannot) take focus.
@@ -1458,6 +1456,8 @@ enum Action {
     ShowDetail(usize, POINT),
     /// Switch the open detail document between compact and full.
     ToggleDetail,
+    /// Refresh a cached detail document after its visibility switches change.
+    RedrawDetail,
     /// Close the window whose own proc raised this action.
     CloseWindow,
     /// Copy the open detail document to the clipboard.
@@ -1480,6 +1480,22 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
     while let Some(action) = actions.pop() {
         match action {
             Action::Redraw => invalidate(hwnd),
+            Action::RedrawDetail => {
+                let popup = State::with(|s| {
+                    let open = s.detail.as_mut()?;
+                    rebuild_doc(
+                        open,
+                        &s.app.config.model_aliases,
+                        &s.app.config.hidden_fields,
+                        &s.app.config.channel_key_aliases,
+                    );
+                    Some(open.hwnd)
+                })
+                .flatten();
+                if let Some(popup) = popup {
+                    invalidate(popup);
+                }
+            }
             Action::Quit => unsafe {
                 let _ = DestroyWindow(hwnd);
             },
@@ -1623,17 +1639,19 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                 });
                 apply_opacity(hwnd, opacity);
             }
-            Action::SetSingleLine(on) => {
-                State::with(|s| s.app.config.single_line = on);
-                // Same row count, shorter cards: refit the window to whole
-                // rows of the new height, keeping it on screen.
-                refit_layout(hwnd, false);
-            }
-            Action::SetTableMode(on) => {
-                State::with(|s| s.app.config.table_mode = on);
-                // Leaving the table hands the width back to the user; entering
-                // it lets the next paint widen the window to fit the columns.
-                refit_layout(hwnd, !on);
+            Action::SetDisplayMode(mode) => {
+                let previous = State::with(|s| {
+                    let previous = s.app.config.layout_mode();
+                    s.app.config.single_line = mode == LayoutMode::SingleLine;
+                    s.app.config.table_mode = mode == LayoutMode::Table;
+                    previous
+                })
+                .unwrap_or(mode);
+                if previous != mode {
+                    // Leaving the table hands the width back to the cards;
+                    // entering it lets the next paint fit the columns.
+                    refit_layout(hwnd, previous == LayoutMode::Table);
+                }
             }
             Action::FitTableWidth(width) => {
                 // The table asked for a width the window does not have yet.
@@ -1756,7 +1774,12 @@ fn run_actions(hwnd: HWND, mut actions: Vec<Action>) {
                         detail::Depth::Compact => detail::Depth::Full,
                         detail::Depth::Full => detail::Depth::Compact,
                     };
-                    rebuild_doc(open, &s.app.config.model_aliases);
+                    rebuild_doc(
+                        open,
+                        &s.app.config.model_aliases,
+                        &s.app.config.hidden_fields,
+                        &s.app.config.channel_key_aliases,
+                    );
                     // The two documents have nothing in common position-wise.
                     open.scroll = 0.0;
                     Some((open.hwnd, open.depth))
@@ -2152,15 +2175,52 @@ fn apply_detail(
             open.error = Some(err.message());
         }
     }
-    rebuild_doc(open, &s.app.config.model_aliases);
+    rebuild_doc(
+        open,
+        &s.app.config.model_aliases,
+        &s.app.config.hidden_fields,
+        &s.app.config.channel_key_aliases,
+    );
     open.scroll = 0.0;
 }
 
 /// Re-render the document for the current depth. Cheap — it is string assembly
 /// — so it runs whenever the attempts arrive or the depth is toggled.
-fn rebuild_doc(open: &mut DetailPopup, aliases: &[config::ModelAlias]) {
+fn rebuild_doc(
+    open: &mut DetailPopup,
+    aliases: &[config::ModelAlias],
+    hidden_fields: &[config::DisplayField],
+    key_aliases: &[config::ChannelKeyAlias],
+) {
+    open.row.channel_key_label = config::channel_key_text(
+        key_aliases,
+        &open.row.account_id,
+        open.row.channel.as_deref(),
+        open.row.channel_api_key_index,
+    );
+    if let Some(executions) = open.executions.as_mut() {
+        for execution in executions {
+            execution.channel_key_label = config::channel_key_text(
+                key_aliases,
+                &open.row.account_id,
+                execution
+                    .channel
+                    .as_ref()
+                    .and_then(|channel| channel.name.as_deref())
+                    .map(str::trim),
+                execution.channel_api_key_index,
+            );
+        }
+    }
     open.doc = open.executions.as_ref().map(|executions| {
-        detail::Doc::build(&open.row, executions, now_unix(), open.depth, aliases)
+        detail::Doc::build(
+            &open.row,
+            executions,
+            now_unix(),
+            open.depth,
+            aliases,
+            hidden_fields,
+        )
     });
 }
 
@@ -2745,14 +2805,9 @@ fn on_command(wp: WPARAM, actions: &mut Vec<Action>) {
         MENU_PIN_POSITION => {
             s.app.config.pin_position = !s.app.config.pin_position;
         }
-        MENU_SINGLE_LINE => {
-            let on = !s.app.config.single_line;
-            actions.push(Action::SetSingleLine(on));
-        }
-        MENU_TABLE_MODE => {
-            let on = !s.app.config.table_mode;
-            actions.push(Action::SetTableMode(on));
-        }
+        MENU_MODE_CARDS => actions.push(Action::SetDisplayMode(LayoutMode::Cards)),
+        MENU_MODE_SINGLE_LINE => actions.push(Action::SetDisplayMode(LayoutMode::SingleLine)),
+        MENU_MODE_TABLE => actions.push(Action::SetDisplayMode(LayoutMode::Table)),
         MENU_OPEN => {
             // Reached with no or one account; with several the entry becomes a
             // submenu and the account branch below handles it. An account's own
@@ -2880,12 +2935,32 @@ fn show_menu(hwnd: HWND) {
                 PCWSTR(sub_label.as_mut_ptr()),
             );
         }
-        // One-line card layout: same row count, shorter cards, shorter panel.
-        let single = State::with(|s| s.app.config.single_line).unwrap_or(false);
-        add("单行模式", MENU_SINGLE_LINE, single, true);
-        // Table layout: one row per request, the window widened to fit.
-        let table = State::with(|s| s.app.config.table_mode).unwrap_or(false);
-        add("表格模式", MENU_TABLE_MODE, table, true);
+        // Display-mode submenu: one layout at a time, the current one ticked.
+        let current_mode =
+            State::with(|s| s.app.config.layout_mode()).unwrap_or(LayoutMode::Table);
+        if let Ok(mode_menu) = CreatePopupMenu() {
+            let items: &[(&str, usize, LayoutMode)] = &[
+                ("卡片", MENU_MODE_CARDS, LayoutMode::Cards),
+                ("单行卡片", MENU_MODE_SINGLE_LINE, LayoutMode::SingleLine),
+                ("表格", MENU_MODE_TABLE, LayoutMode::Table),
+            ];
+            for &(text, mid, mode) in items {
+                let mut wide = label(text);
+                let mut flags = MF_STRING;
+                if current_mode == mode {
+                    // Radio dots rather than ticks: the three are exclusive.
+                    flags |= MF_CHECKED | MENU_ITEM_FLAGS(MFT_RADIOCHECK.0);
+                }
+                let _ = AppendMenuW(mode_menu, flags, mid, PCWSTR(wide.as_mut_ptr()));
+            }
+            let mut sub_label = label("显示模式");
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | MF_POPUP,
+                mode_menu.0 as usize,
+                PCWSTR(sub_label.as_mut_ptr()),
+            );
+        }
 
         add("刷新", MENU_REFRESH, false, true);
         // Several accounts are several servers, so the entry turns into a

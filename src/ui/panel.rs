@@ -730,6 +730,23 @@ fn draw_card(
         }
     }
 
+    // Channel API key index, exactly as AxonHub reports it.
+    if v.shows(DisplayField::ChannelAPIKeyIndex)
+        && let Some(index) = key_index_text(row)
+    {
+        place_cell(
+            p,
+            fonts,
+            &index,
+            theme::TEXT_FAINT,
+            line1_y,
+            &mut x,
+            cells_limit,
+            c.line1,
+            5.0 * m.scale,
+        );
+    }
+
     // Tokens.
     if v.shows(DisplayField::Tokens) && row.total_tokens > 0 {
         let tokens = fmt::tokens_compact(row.total_tokens);
@@ -840,6 +857,25 @@ fn draw_card(
             theme::ALIGN_NEAR,
         );
         x += chip_w + line2_gap;
+    }
+
+    // Upstream model: the provider's own model name, with the vendor prefix
+    // stripped. It is a separate cell from the model chip because routing can
+    // make the two differ.
+    if v.shows(DisplayField::UpstreamModel)
+        && let Some(upstream) = upstream_model_text(row)
+    {
+        place_cell(
+            p,
+            fonts,
+            &upstream,
+            theme::TEXT_DIM,
+            y,
+            &mut x,
+            right_edge,
+            c.line2,
+            line2_gap,
+        );
     }
 
     // Cache hit rate.
@@ -1112,6 +1148,23 @@ fn draw_card_single(
         }
     }
 
+    // Channel API key index, exactly as AxonHub reports it.
+    if v.shows(DisplayField::ChannelAPIKeyIndex)
+        && let Some(index) = key_index_text(row)
+    {
+        place_cell(
+            p,
+            fonts,
+            &index,
+            theme::TEXT_FAINT,
+            small_y,
+            &mut x,
+            limit,
+            c.line2,
+            gap,
+        );
+    }
+
     // Model chip: the row's identity, drawn last so it is compressed to
     // whatever room the fixed-width prefix above leaves for it.
     if v.shows(DisplayField::Model) {
@@ -1135,6 +1188,23 @@ fn draw_card_single(
             theme::ALIGN_NEAR,
         );
         x += chip_w + gap;
+    }
+
+    // Upstream model, when it differs from what the chip shows.
+    if v.shows(DisplayField::UpstreamModel)
+        && let Some(upstream) = upstream_model_text(row)
+    {
+        place_cell(
+            p,
+            fonts,
+            &upstream,
+            theme::TEXT_DIM,
+            small_y,
+            &mut x,
+            limit,
+            c.line2,
+            gap,
+        );
     }
 
     // Caller: the API key name only.
@@ -1207,6 +1277,32 @@ fn draw_card_single(
     draw_source(p, fonts, row, v, small_y, &mut x, limit, c.line2, gap);
 }
 
+/// The provider's model name with the vendor prefix stripped, matching how the
+/// model chip shortens the requested/served model.
+pub(crate) fn upstream_model_text(row: &Row) -> Option<String> {
+    let model = row.upstream_model.as_deref()?;
+    let model = model::display_model_name(model, &[]);
+    (!model.is_empty()).then_some(model)
+}
+
+/// The configured alias, falling back to the untouched upstream index.
+pub(crate) fn key_index_text(row: &Row) -> Option<String> {
+    row.channel_api_key_index.map(|index| {
+        row.channel_key_label
+            .as_deref()
+            .filter(|label| !label.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Key #{index}"))
+    })
+}
+
+/// `写 1.5k`: tokens written into the prompt cache, when the request reported
+/// any. Kept beside the other usage readings rather than in its own line.
+pub(crate) fn cache_write_text(row: &Row) -> Option<String> {
+    (row.write_cached_tokens > 0)
+        .then(|| format!("写 {}", fmt::tokens_compact(row.write_cached_tokens)))
+}
+
 /// Latency and completion tokens (plus cost in the multi-line layout), drawn
 /// left to right until the line runs out.
 #[allow(clippy::too_many_arguments)]
@@ -1237,6 +1333,16 @@ fn draw_usage_line(
             line_h,
             gap,
         );
+    }
+    if v.shows(DisplayField::CostBreakdown)
+        && let Some(label) = row.cost_breakdown_text()
+    {
+        place_cell(p, fonts, &label, theme::YELLOW, y, x, limit, line_h, gap);
+    }
+    if v.shows(DisplayField::CacheWrite)
+        && let Some(label) = cache_write_text(row)
+    {
+        place_cell(p, fonts, &label, theme::TEXT_DIM, y, x, limit, line_h, gap);
     }
     if v.shows(DisplayField::Latency)
         && let Some(label) = fmt::latency(row.latency_ms, row.first_token_ms)

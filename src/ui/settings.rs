@@ -65,6 +65,20 @@ pub enum Action {
     AddAlias,
     /// Drop the mapping at this index.
     RemoveAlias(usize),
+    /// Switch the shared "名称映射" tab to the model (false) or key (true) form.
+    MappingPage(bool),
+    /// Pick the account/channel a key alias applies to. Selection is temporary.
+    KeyTarget(HiddenChannel),
+    /// The key-index cell, covered by a native edit box that accepts integers.
+    KeyIndexInput,
+    /// The key-alias cell, also covered by a native edit box.
+    KeyAliasInput,
+    /// Take the target, index and alias and add (or update) the mapping.
+    AddKeyAlias,
+    /// Load one saved mapping back into the form.
+    EditKeyAlias(usize),
+    /// Drop the key mapping at this index.
+    RemoveKeyAlias(usize),
     Refresh,
     OpenRequests,
     Quit,
@@ -85,6 +99,15 @@ pub struct State {
     pub font_names: Vec<InstalledFont>,
     pub font_matches: Vec<usize>,
     pub font_query: String,
+    /// The "名称映射" tab has two forms: model names (false) and channel keys
+    /// (true). The top-level tab count stays at six.
+    pub mapping_keys: bool,
+    /// The account/channel picked for the key form. Not persisted. It is
+    /// fixed when the Key subpage opens and afterwards changes only on a
+    /// click, so polling cannot move the target under the user's cursor.
+    pub key_alias_target: Option<HiddenChannel>,
+    /// Why the last key-mapping attempt was rejected, shown on the form.
+    pub key_alias_error: Option<String>,
 }
 
 impl State {
@@ -101,6 +124,38 @@ impl State {
         self.hover = None;
         self.pressed = None;
     }
+
+    /// Freeze the first target when the Key subpage opens. Once a target is
+    /// chosen, later polls may add channels but must not move the selection.
+    pub fn ensure_key_alias_target(&mut self, targets: &[HiddenChannel]) {
+        if self.key_alias_target.is_none() {
+            self.key_alias_target = targets.first().cloned();
+        }
+    }
+}
+
+/// Targets for the key-alias form: every account/channel pair seen in the
+/// fetched requests, plus pairs that already have a saved alias. The latter
+/// may be absent from the current rows and must stay editable.
+pub fn key_targets(app: &App) -> Vec<HiddenChannel> {
+    let mut out = app.channel_filters();
+    for alias in &app.config.channel_key_aliases {
+        let entry = HiddenChannel {
+            account_id: alias.account_id.clone(),
+            channel: alias.channel.clone(),
+        };
+        if !out.contains(&entry) {
+            out.push(entry);
+        }
+    }
+    out.sort_by(|a, b| (&a.account_id, &a.channel).cmp(&(&b.account_id, &b.channel)));
+    out
+}
+
+/// Parse the native key-index box. Pasting is not filtered, so the whole text
+/// is parsed again: `2.5`, `-1` and blanks are all rejected.
+pub fn normalize_key_index(text: &str) -> Option<i64> {
+    text.trim().parse::<i64>().ok().filter(|index| *index >= 0)
 }
 
 pub struct Control {
@@ -142,10 +197,11 @@ impl Layout {
             controls: Vec::new(),
             labels: Vec::new(),
             content_height: 0.0,
-            content_top: if state.tab == Tab::Fonts {
-                TOP + 112.0
-            } else {
-                TOP
+            content_top: match state.tab {
+                Tab::Fonts => TOP + 112.0,
+                // The model/key switch stays in the header of this tab.
+                Tab::Models => TOP + 44.0,
+                _ => TOP,
             },
             font_header: None,
         };
@@ -156,7 +212,7 @@ impl Layout {
             (Tab::Fonts, "字体".to_string()),
             (Tab::Accounts, format!("账号 · {}", app.accounts.len())),
             (Tab::Channels, "渠道过滤".to_string()),
-            (Tab::Models, "模型映射".to_string()),
+            (Tab::Models, "名称映射".to_string()),
         ]
         .into_iter()
         .enumerate()
@@ -175,13 +231,43 @@ impl Layout {
                 false,
             );
         }
+        if state.tab == Tab::Models {
+            // Fixed above the scrolling body, so the two forms are always one
+            // click away. `content_top` below leaves room for this row.
+            l.button(
+                Rect {
+                    x: 24.0,
+                    y: TOP + 6.0,
+                    w: 110.0,
+                    h: 30.0,
+                },
+                "模型映射",
+                Action::MappingPage(false),
+                !state.mapping_keys,
+                false,
+                false,
+            );
+            l.button(
+                Rect {
+                    x: 140.0,
+                    y: TOP + 6.0,
+                    w: 100.0,
+                    h: 30.0,
+                },
+                "Key映射",
+                Action::MappingPage(true),
+                state.mapping_keys,
+                false,
+                false,
+            );
+        }
         match state.tab {
             Tab::Display => l.display(app),
             Tab::Fields => l.fields(app),
             Tab::Fonts => l.fonts(app, state),
             Tab::Accounts => l.accounts(app),
             Tab::Channels => l.channels(app),
-            Tab::Models => l.models(app),
+            Tab::Models => l.models(app, state),
         }
         let y = height - 40.0;
         if state.pending.is_some() {
@@ -787,10 +873,20 @@ impl Layout {
         self.content_height = (y + 16.0).max(160.0);
     }
 
-    /// The model-name abbreviation tab: a two-box form plus the saved list.
+    /// The "名称映射" tab keeps its model-name form and adds a second form for
+    /// channel-key labels. Both share the native-box pipeline.
+    fn models(&mut self, app: &App, state: &State) {
+        if state.mapping_keys {
+            self.key_aliases(app, state);
+        } else {
+            self.model_aliases(app);
+        }
+    }
+
+    /// The model-name abbreviation form: a two-box form plus the saved list.
     /// The boxes are native edit controls placed by `sync_edit_boxes`, the
     /// same way the font-size and opacity fields work.
-    fn models(&mut self, app: &App) {
+    fn model_aliases(&mut self, app: &App) {
         let aliases = &app.config.model_aliases;
         self.label(0.0, format!("模型名映射 · 当前 {} 条", aliases.len()), true);
         self.label(
@@ -872,6 +968,187 @@ impl Layout {
             y += 38.0;
         }
         self.content_height = (y + 12.0).max(160.0);
+    }
+
+    /// The channel-key form: pick an account/channel, then bind a credential
+    /// index to a display alias. Targets include channels from fetched rows
+    /// and targets that already have aliases, so old mappings stay editable.
+    fn key_aliases(&mut self, app: &App, state: &State) {
+        let aliases = &app.config.channel_key_aliases;
+        self.label(
+            0.0,
+            format!("Key 别名映射 · 当前 {} 条", aliases.len()),
+            true,
+        );
+        self.label(
+            26.0,
+            "按账号 + 渠道 + Key 索引显示别名，如 A / index2 → my-k2",
+            false,
+        );
+        let mut targets = key_targets(app);
+        // No fallback here: the selection is frozen when the subpage opens.
+        // Re-deriving it from the first target would let a poll move it while
+        // the user is typing an index and alias.
+        let selected = state.key_alias_target.clone();
+        // A poll can drop the channel the user picked before they apply the
+        // alias. Keep showing that explicit target instead of silently
+        // switching to a different first row.
+        if let Some(target) = &selected
+            && !targets.contains(target)
+        {
+            targets.push(target.clone());
+            targets.sort_by(|a, b| (&a.account_id, &a.channel).cmp(&(&b.account_id, &b.channel)));
+        }
+        let mut y = 62.0;
+        if targets.is_empty() {
+            self.label(
+                y,
+                "暂无可映射渠道，先连接账号并刷新请求；有请求后这里会出现目标",
+                false,
+            );
+            y += 34.0;
+        } else {
+            self.label(y, "目标账号与渠道", true);
+            y += 28.0;
+            for entry in &targets {
+                let name = app
+                    .config
+                    .account(&entry.account_id)
+                    .map(|a| a.name.as_str())
+                    .unwrap_or(&entry.account_id);
+                let is_selected = selected.as_ref() == Some(entry);
+                self.button(
+                    Rect {
+                        x: 24.0,
+                        y,
+                        w: self.width - 48.0,
+                        h: 34.0,
+                    },
+                    format!(
+                        "{}  {name} · {}",
+                        if is_selected { "●" } else { "○" },
+                        entry.channel
+                    ),
+                    Action::KeyTarget(entry.clone()),
+                    is_selected,
+                    false,
+                    true,
+                );
+                y += 40.0;
+            }
+            y += 6.0;
+        }
+        self.label(y, "Key 索引与别名", true);
+        y += 26.0;
+        // Native edit cells; the controls only carry geometry and Tab order.
+        self.controls.push(Control {
+            rect: Rect {
+                x: 24.0,
+                y,
+                w: 90.0,
+                h: 30.0,
+            },
+            label: String::new(),
+            action: Action::KeyIndexInput,
+            selected: false,
+            danger: false,
+            body: true,
+            check: false,
+        });
+        let alias_x = 120.0;
+        let button_x = self.width - 144.0;
+        self.controls.push(Control {
+            rect: Rect {
+                x: alias_x,
+                y,
+                w: (button_x - 6.0 - alias_x).max(80.0),
+                h: 30.0,
+            },
+            label: String::new(),
+            action: Action::KeyAliasInput,
+            selected: false,
+            danger: false,
+            body: true,
+            check: false,
+        });
+        self.button(
+            Rect {
+                x: button_x,
+                y,
+                w: 120.0,
+                h: 30.0,
+            },
+            "添加 / 更新",
+            Action::AddKeyAlias,
+            false,
+            false,
+            true,
+        );
+        y += 38.0;
+        if let Some(error) = &state.key_alias_error {
+            self.label_colored(y, error, false, Some(theme::RED));
+        } else {
+            self.label(
+                y,
+                "索引填卡片上「Key #」后的数字（AxonHub 从 1 开始）；小数、负数或空别名不会被接受",
+                false,
+            );
+        }
+        y += 28.0;
+        self.label(y, format!("已有映射 · {} 条", aliases.len()), true);
+        y += 28.0;
+        if aliases.is_empty() {
+            self.label(y, "暂无 Key 映射；填好后点「添加 / 更新」", false);
+            y += 34.0;
+        }
+        for (index, alias) in aliases.iter().enumerate() {
+            let name = app
+                .config
+                .account(&alias.account_id)
+                .map(|a| a.name.as_str())
+                .unwrap_or(&alias.account_id);
+            // The alias is display-only; the index still matches the wire
+            // credential, so a mapping does not shorten the raw model id.
+            self.label(
+                y + 6.0,
+                format!(
+                    "{name} · {} · Key #{} → {}",
+                    alias.channel, alias.key_index, alias.alias
+                ),
+                false,
+            );
+            if let Some(label) = self.labels.last_mut() {
+                label.rect.w -= 180.0;
+            }
+            self.button(
+                Rect {
+                    x: self.width - 174.0,
+                    y,
+                    w: 70.0,
+                    h: 28.0,
+                },
+                "编辑",
+                Action::EditKeyAlias(index),
+                false,
+                false,
+                true,
+            );
+            self.button(
+                Rect {
+                    x: self.width - 94.0,
+                    y,
+                    w: 70.0,
+                    h: 28.0,
+                },
+                "删除",
+                Action::RemoveKeyAlias(index),
+                false,
+                true,
+                true,
+            );
+            y += 36.0;
+        }
+        self.content_height = (y + 12.0).max(180.0);
     }
 
     pub fn view_height(&self) -> f32 {
@@ -1088,6 +1365,8 @@ impl Layout {
                         | Action::OpacityInput
                         | Action::AliasFromInput
                         | Action::AliasToInput
+                        | Action::KeyIndexInput
+                        | Action::KeyAliasInput
                 ) {
                     continue;
                 }

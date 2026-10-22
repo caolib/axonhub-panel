@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::{DetailData, Envelope, Status};
+use crate::model::{CostItem, DetailData, Envelope, Status, TierCost};
 
 /// Two attempts of one failed request — the shape the popup exists for.
 /// Values are stand-ins: the real ones carry gateway internals.
@@ -9,6 +9,8 @@ const SAMPLE: &str = r#"{
       "createdAt": "2026-09-18T11:32:33.2110863Z",
       "updatedAt": "2026-09-18T11:33:23.0073162Z",
       "modelID": "glm-5.3-flash",
+      "upstreamModelID": "openai/upstream-a",
+      "channelAPIKeyIndex": 0,
       "channel": { "id": "gid://axonhub/Channel/2", "name": "ch-b", "type": "openai", "baseURL": "https://api.example.com/v1" },
       "status": "canceled",
       "responseStatusCode": null,
@@ -24,6 +26,8 @@ const SAMPLE: &str = r#"{
       "createdAt": "2026-09-18T11:28:23.0328274Z",
       "updatedAt": "2026-09-18T11:32:32.2058876Z",
       "modelID": "glm-5.3-flash",
+      "upstreamModelID": "openai/upstream-b",
+      "channelAPIKeyIndex": 1,
       "channel": { "id": "gid://axonhub/Channel/1", "name": "ch-a", "type": "openai", "baseURL": "http://10.0.0.1:18090/v1" },
       "status": "failed",
       "responseStatusCode": 429,
@@ -64,7 +68,10 @@ fn row() -> Row {
         status: Status::Failed,
         model: "glm-5.3-flash".into(),
         routed_model: None,
+        upstream_model: Some("openai/upstream-glm".into()),
         channel: Some("ch-a".into()),
+        channel_api_key_index: Some(0),
+        channel_key_label: None,
         caller: Some("cc".into()),
         source: Some("api".into()),
         client_ip: Some("::1".into()),
@@ -81,8 +88,26 @@ fn row() -> Row {
         reasoning_tokens: 0,
         total_tokens: 1200,
         cached_tokens: 0,
-        write_cached_tokens: 0,
+        write_cached_tokens: 640,
         total_cost: Some(0.1388096),
+        cost_items: vec![
+            CostItem {
+                item_code: "prompt_tokens".into(),
+                quantity: 900,
+                subtotal: 0.01,
+                tier_breakdown: Vec::new(),
+            },
+            CostItem {
+                item_code: "completion_tokens".into(),
+                quantity: 300,
+                subtotal: 0.02,
+                tier_breakdown: vec![TierCost {
+                    up_to: Some(1_000),
+                    units: 300,
+                    subtotal: 0.02,
+                }],
+            },
+        ],
         attempt_count: 2,
         failed_attempts: 1,
         attempts_truncated: false,
@@ -105,12 +130,27 @@ fn parses_the_executions_query_answer() {
 
 #[test]
 fn the_full_document_carries_every_channel_code_and_error() {
-    let doc = Doc::build(&row(), &executions(), 1_789_179_657, Depth::Full, &[]);
+    let doc = Doc::build(&row(), &executions(), 1_789_179_657, Depth::Full, &[], &[]);
     let text = plain_text(&doc);
 
     assert!(text.contains("调用者: cc"), "{text}");
     assert!(text.contains("来源: api · ::1"), "{text}");
     assert!(text.contains("费用: $0.1388"), "{text}");
+    // New routing/cost cells: the request overview strips the provider prefix,
+    // keeps the raw key index, and expands the cost items.
+    assert!(text.contains("上游模型: upstream-glm"), "{text}");
+    assert!(text.contains("渠道 Key: Key #0"), "{text}");
+    assert!(text.contains("写入 640"), "{text}");
+    assert!(text.contains("费用明细: 入 $0.0100 · 出 $0.0200"), "{text}");
+    assert!(text.contains("成本项: 输入 · 数量 900 · $0.0100"), "{text}");
+    assert!(
+        text.contains("成本项: 输出 · 数量 300 · $0.0200 · 阶梯 1.0k 300u $0.0200"),
+        "{text}"
+    );
+    // Each execution names its own actual upstream model and credential index.
+    assert!(text.contains("上游模型: upstream-a"), "{text}");
+    assert!(text.contains("上游模型: upstream-b"), "{text}");
+    assert!(text.contains("渠道 Key: Key #1"), "{text}");
     assert!(text.contains("出 300"), "{text}");
     assert!(text.contains("状态: 失败"), "{text}");
     assert!(text.contains("模型: glm-5.3-flash(max)"), "{text}");
@@ -141,7 +181,14 @@ fn the_full_document_carries_every_channel_code_and_error() {
 
 #[test]
 fn the_compact_document_keeps_the_channel_code_model_and_error() {
-    let doc = Doc::build(&row(), &executions(), 1_789_179_657, Depth::Compact, &[]);
+    let doc = Doc::build(
+        &row(),
+        &executions(),
+        1_789_179_657,
+        Depth::Compact,
+        &[],
+        &[],
+    );
     let text = plain_text(&doc);
 
     assert!(text.contains("执行 1 · 已取消"), "{text}");
@@ -150,6 +197,12 @@ fn the_compact_document_keeps_the_channel_code_model_and_error() {
     assert!(text.contains("渠道: ch-a(openai)"), "{text}");
     assert!(text.contains("状态码: 429"), "{text}");
     assert!(text.contains("模型: glm-5.3-flash(max)"), "{text}");
+    // The actual upstream model and key index stay visible per attempt, since
+    // they explain which credential and provider each retry used.
+    assert!(text.contains("上游模型: upstream-a"), "{text}");
+    assert!(text.contains("上游模型: upstream-b"), "{text}");
+    assert!(text.contains("渠道 Key: Key #0"), "{text}");
+    assert!(text.contains("渠道 Key: Key #1"), "{text}");
     assert!(
         text.contains("错误: Concurrency limit exceeded for account, please retry later"),
         "{text}"
@@ -172,18 +225,99 @@ fn the_compact_document_keeps_the_channel_code_model_and_error() {
         );
     }
     // Every attempt gets a status row, even the one that never got a status
-    // line — there the value is a dash rather than a number.
+    // line — there the value is left blank rather than a number.
     assert_eq!(text.matches("状态码:").count(), 2, "{text}");
-    assert!(text.contains("状态码: —"), "{text}");
+    assert!(text.contains("状态码:\n"), "{text}");
 }
 
 #[test]
 fn a_request_without_executions_says_so() {
     for depth in [Depth::Compact, Depth::Full] {
-        let doc = Doc::build(&row(), &[], 1_789_179_657, depth, &[]);
+        let doc = Doc::build(&row(), &[], 1_789_179_657, depth, &[], &[]);
         let text = plain_text(&doc);
         assert!(text.contains("没有记录到上游执行"), "{depth:?}: {text}");
     }
+}
+
+#[test]
+fn the_four_new_fields_toggle_independently_in_the_document() {
+    let fields = [
+        (DisplayField::UpstreamModel, "上游模型:"),
+        (DisplayField::ChannelAPIKeyIndex, "渠道 Key:"),
+        (DisplayField::CacheWrite, "写入 640"),
+        (DisplayField::CostBreakdown, "费用明细:"),
+    ];
+    for (hidden_field, _) in fields {
+        let hidden = [hidden_field];
+        let doc = Doc::build(
+            &row(),
+            &executions(),
+            1_789_179_657,
+            Depth::Full,
+            &[],
+            &hidden,
+        );
+        let text = plain_text(&doc);
+        for (field, marker) in fields {
+            assert_eq!(
+                text.contains(marker),
+                field != hidden_field,
+                "hiding {hidden_field:?} should only remove its own marker ({marker}): {text}"
+            );
+        }
+        // Existing fields are untouched by the new switches.
+        assert!(text.contains("费用: $0.1388"), "{text}");
+        assert!(text.contains("模型: glm-5.3-flash(max)"), "{text}");
+    }
+}
+
+#[test]
+fn the_overview_does_not_apply_upstream_model_aliases_twice() {
+    let aliases = [ModelAlias {
+        from: "raw".into(),
+        to: "raw-x".into(),
+    }];
+    let mut request = row();
+    // App::rebuild has already applied aliases to the overview's row.
+    request.upstream_model = Some("raw-x".into());
+    let doc = Doc::build(&request, &[], 0, Depth::Full, &aliases, &[]);
+    let text = plain_text(&doc);
+    assert!(text.contains("上游模型: raw-x\n"), "{text}");
+    assert!(!text.contains("raw-x-x"), "{text}");
+}
+
+#[test]
+fn key_aliases_replace_the_overview_and_each_attempt_label() {
+    let mut request = row();
+    request.channel_key_label = Some("overview-key".into());
+    let mut attempts = executions();
+    attempts[0].channel_key_label = Some("first-key".into());
+    attempts[1].channel_key_label = Some("second-key".into());
+    let doc = Doc::build(&request, &attempts, 0, Depth::Full, &[], &[]);
+    let text = plain_text(&doc);
+    for label in ["overview-key", "first-key", "second-key"] {
+        assert!(text.contains(&format!("渠道 Key: {label}")), "{text}");
+    }
+    assert!(!text.contains("Key #"), "{text}");
+    let hidden = [DisplayField::ChannelAPIKeyIndex];
+    let doc = Doc::build(&request, &attempts, 0, Depth::Full, &[], &hidden);
+    assert!(!plain_text(&doc).contains("渠道 Key:"));
+}
+
+#[test]
+fn empty_new_fields_are_omitted_from_the_document() {
+    let mut empty = row();
+    empty.upstream_model = None;
+    empty.channel_api_key_index = None;
+    empty.write_cached_tokens = 0;
+    empty.cost_items.clear();
+    let doc = Doc::build(&empty, &[], 1_789_179_657, Depth::Full, &[], &[]);
+    let text = plain_text(&doc);
+    for marker in ["上游模型:", "渠道 Key:", "写入 ", "费用明细:", "成本项:"] {
+        assert!(!text.contains(marker), "{marker} leaked: {text}");
+    }
+    assert!(text.contains("费用: $0.1388"), "{text}");
+    assert!(text.contains("令牌:"), "{text}");
 }
 
 #[test]
